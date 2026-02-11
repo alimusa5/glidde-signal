@@ -106,7 +106,7 @@ async function insertEntriesInChunks(
     project_id: string;
     user_id: string;
     source: string;
-    text: string;
+    content: string; // renamed
   }>,
   chunkSize = 500,
 ) {
@@ -119,7 +119,6 @@ async function insertEntriesInChunks(
 
 export async function POST(req: Request) {
   try {
-    // 1) Read Bearer token from Authorization header
     const authHeader = req.headers.get("authorization") ?? "";
     if (!authHeader.startsWith("Bearer ")) {
       return NextResponse.json(
@@ -129,10 +128,10 @@ export async function POST(req: Request) {
     }
 
     const token = authHeader.slice("Bearer ".length).trim();
-    if (!token)
+    if (!token) {
       return NextResponse.json({ error: "Empty token" }, { status: 401 });
+    }
 
-    // 2) Create Supabase client that runs queries as the user (RLS enforced)
     const supabase = createClient(
       process.env.NEXT_PUBLIC_SUPABASE_URL!,
       process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
@@ -141,7 +140,6 @@ export async function POST(req: Request) {
       },
     );
 
-    // 3) Verify user explicitly using token
     const { data: userData, error: userErr } =
       await supabase.auth.getUser(token);
     const user = userData.user;
@@ -153,7 +151,6 @@ export async function POST(req: Request) {
       );
     }
 
-    // 4) Read multipart form-data
     const formData = await req.formData();
     const projectId = String(formData.get("projectId") ?? "");
     const source = String(formData.get("source") ?? "");
@@ -165,11 +162,11 @@ export async function POST(req: Request) {
         { status: 400 },
       );
     }
+
     if (!(file instanceof File)) {
       return NextResponse.json({ error: "Missing CSV file" }, { status: 400 });
     }
 
-    // 5) Ensure user owns project
     const { data: proj, error: projErr } = await supabase
       .from("projects")
       .select("id")
@@ -181,18 +178,17 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "Project not found" }, { status: 404 });
     }
 
-    // 6) Parse CSV + choose text column
     const csvText = await file.text();
     const parsed = parseCsv(csvText);
 
     const textCol = pickTextColumn(parsed.headers);
-    if (!textCol)
+    if (!textCol) {
       return NextResponse.json(
         { error: "No CSV columns found" },
         { status: 400 },
       );
+    }
 
-    // 7) Normalize + dedupe
     const rawTexts = parsed.rows.map((r) => normalizeText(r[textCol] ?? ""));
     const unique = dedupeExact(rawTexts.filter((t) => t.length > 0));
 
@@ -203,7 +199,6 @@ export async function POST(req: Request) {
       );
     }
 
-    // 8) Create upload batch
     const { data: upload, error: uploadErr } = await supabase
       .from("uploads")
       .insert({
@@ -222,13 +217,13 @@ export async function POST(req: Request) {
       );
     }
 
-    // 9) Insert entries
-    const entryRows = unique.map((text) => ({
+    // INSERT INTO content (not text)
+    const entryRows = unique.map((content) => ({
       upload_id: upload.id,
       project_id: projectId,
       user_id: user.id,
       source,
-      text,
+      content,
     }));
 
     await insertEntriesInChunks(supabase, entryRows);

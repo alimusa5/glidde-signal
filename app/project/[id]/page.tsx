@@ -1,15 +1,8 @@
 "use client";
 
-/**
- * - Loads a single project (auth-gated)
- * - Upload feedback via CSV OR pasted text
- * - Calls API routes with Authorization: Bearer <access_token>
- * - Shows confirmation: "Entries ingested: X — Ready to analyze."
- * - Shows "Latest Upload Summary" (persisted via DB query)
- */
-
 import { useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
+import Link from "next/link";
 import { supabase } from "@/lib/supabase";
 
 type UploadResult = { uploadId: string; count: number };
@@ -17,26 +10,18 @@ type UploadResult = { uploadId: string; count: number };
 type LatestUploadSummary = {
   uploadId: string;
   source: string;
-  createdAt: string; // ISO string
+  createdAt: string;
   count: number;
 };
 
 export default function ProjectPage() {
   const router = useRouter();
-
-  // Read project ID from the route: /project/[id]
   const params = useParams<{ id: string }>();
   const id = params.id;
 
-  // -------------------------------
-  // Project loading state
-  // -------------------------------
   const [loading, setLoading] = useState(true);
   const [name, setName] = useState("");
 
-  // -------------------------------
-  // Upload UI state
-  // -------------------------------
   const [source, setSource] = useState<string>("");
   const [csvFile, setCsvFile] = useState<File | null>(null);
   const [rawText, setRawText] = useState<string>("");
@@ -45,34 +30,22 @@ export default function ProjectPage() {
   const [resultMsg, setResultMsg] = useState<string>("");
   const [errorMsg, setErrorMsg] = useState<string>("");
 
-  // -------------------------------
-  // Latest upload summary
-  // -------------------------------
   const [latest, setLatest] = useState<LatestUploadSummary | null>(null);
   const [loadingLatest, setLoadingLatest] = useState(false);
 
-  // -------------------------------
-  // Auth helper: get access token
-  // -------------------------------
   async function getAccessToken(): Promise<string> {
     const { data, error } = await supabase.auth.getSession();
-    if (error) throw new Error("Not authenticated. Please log in again.");
-
-    const token = data.session?.access_token;
-    if (!token) throw new Error("Not authenticated. Please log in again.");
-
-    return token;
+    if (error || !data.session?.access_token) {
+      throw new Error("Not authenticated. Please log in again.");
+    }
+    return data.session.access_token;
   }
 
-  // -------------------------------
-  // helper: load latest upload summary from DB
-  // -------------------------------
   async function loadLatestUploadSummary(projectId: string) {
     setLoadingLatest(true);
 
     try {
-      // 1) Get latest upload for this project
-      const { data: u, error: uErr } = await supabase
+      const { data: u } = await supabase
         .from("uploads")
         .select("id, source, created_at")
         .eq("project_id", projectId)
@@ -80,28 +53,15 @@ export default function ProjectPage() {
         .limit(1)
         .maybeSingle();
 
-      if (uErr) {
-        // Not fatal; just don't show summary
-        setLatest(null);
-        return;
-      }
-
       if (!u) {
-        // No uploads yet
         setLatest(null);
         return;
       }
 
-      // 2) Count entries for that upload (head:true avoids downloading rows)
-      const { count, error: cErr } = await supabase
+      const { count } = await supabase
         .from("feedback_entries")
         .select("id", { count: "exact", head: true })
         .eq("upload_id", u.id);
-
-      if (cErr) {
-        setLatest(null);
-        return;
-      }
 
       setLatest({
         uploadId: u.id,
@@ -114,14 +74,7 @@ export default function ProjectPage() {
     }
   }
 
-  // -------------------------------
-  // API helpers (send Authorization header)
-  // -------------------------------
-  async function uploadCsv(
-    projectId: string,
-    src: string,
-    file: File,
-  ): Promise<UploadResult> {
+  async function uploadCsv(projectId: string, src: string, file: File) {
     const token = await getAccessToken();
 
     const fd = new FormData();
@@ -140,11 +93,7 @@ export default function ProjectPage() {
     return data as UploadResult;
   }
 
-  async function uploadText(
-    projectId: string,
-    src: string,
-    text: string,
-  ): Promise<UploadResult> {
+  async function uploadText(projectId: string, src: string, text: string) {
     const token = await getAccessToken();
 
     const res = await fetch("/api/upload/text", {
@@ -161,138 +110,133 @@ export default function ProjectPage() {
     return data as UploadResult;
   }
 
-  // -------------------------------
-  // Load project + enforce auth
-  // -------------------------------
   useEffect(() => {
     async function load() {
-      // Check if user is logged in
       const { data: userData } = await supabase.auth.getUser();
       if (!userData.user) {
         router.replace("/login");
         return;
       }
 
-      // Fetch project name
-      const { data, error } = await supabase
+      const { data } = await supabase
         .from("projects")
         .select("name")
         .eq("id", id)
         .single();
 
-      if (error || !data) {
+      if (!data) {
         router.replace("/dashboard");
         return;
       }
 
       setName(data.name);
       setLoading(false);
-
-      // load latest upload summary on page load
       await loadLatestUploadSummary(id);
     }
 
     load();
   }, [id, router]);
 
-  if (loading) return <div style={{ padding: 24 }}>Loading project...</div>;
+  if (loading) return <div style={{ padding: 32 }}>Loading project...</div>;
 
-  const formatTime = (iso: string) => {
-    // browser-local display
-    try {
-      return new Date(iso).toLocaleString();
-    } catch {
-      return iso;
-    }
-  };
+  const formatTime = (iso: string) => new Date(iso).toLocaleString();
 
   return (
-    <div style={{ padding: 24, maxWidth: 900 }}>
-      <h1>{name}</h1>
+    <div style={{ padding: 40, maxWidth: 800, margin: "0 auto" }}>
+      <h1 style={{ fontSize: 28, fontWeight: 600 }}>{name}</h1>
 
-      {/*Latest Upload Summary */}
-      <div
+      {/* Latest Upload Summary */}
+      <section
         style={{
-          marginTop: 16,
-          border: "1px solid #eee",
+          marginTop: 32,
+          border: "1px solid #e5e5e5",
           borderRadius: 12,
-          padding: 16,
-          display: "grid",
-          gap: 6,
+          padding: 20,
+          background: "#fafafa",
         }}
       >
-        <div style={{ fontWeight: 600 }}>Latest upload summary</div>
+        <div style={{ fontWeight: 600, marginBottom: 12 }}>Latest Upload</div>
 
         {loadingLatest ? (
-          <div>Loading latest upload…</div>
+          <div>Loading…</div>
         ) : latest ? (
           <>
             <div>Source: {latest.source}</div>
-            <div>Entries ingested: {latest.count}</div>
-            <div>Time uploaded: {formatTime(latest.createdAt)}</div>
-            <div>Status: Ready to analyze</div>
+            <div>Entries: {latest.count}</div>
+            <div>Uploaded: {formatTime(latest.createdAt)}</div>
+            <div style={{ marginTop: 4 }}>Status: Ready to analyze</div>
+
+            {/* 👇 Step 1: View Feedback Doorway */}
+            <div style={{ marginTop: 16 }}>
+              <Link
+                href={`/project/${id}/feedback`}
+                style={{
+                  display: "inline-block",
+                  padding: "8px 14px",
+                  borderRadius: 8,
+                  border: "1px solid #ccc",
+                  textDecoration: "none",
+                  fontSize: 14,
+                }}
+              >
+                View Feedback
+              </Link>
+            </div>
           </>
         ) : (
           <div>No uploads yet.</div>
         )}
-      </div>
+      </section>
 
-      {/* Upload section */}
-      <div
+      {/* Upload Section */}
+      <section
         style={{
-          marginTop: 24,
-          border: "1px solid #ddd",
+          marginTop: 40,
+          border: "1px solid #e5e5e5",
           borderRadius: 12,
           padding: 24,
-          display: "grid",
-          gap: 12,
         }}
       >
-        <h2 style={{ fontSize: 24 }}>Upload customer feedback</h2>
+        <h2 style={{ fontSize: 20, marginBottom: 16 }}>
+          Upload Customer Feedback
+        </h2>
 
-        <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
-          <label>
-            Source:&nbsp;
-            <select value={source} onChange={(e) => setSource(e.target.value)}>
-              <option value="">Select source</option>
-              <option value="reviews">Reviews</option>
-              <option value="support">Support</option>
-              <option value="surveys">Surveys</option>
-            </select>
-          </label>
+        <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
+          <select value={source} onChange={(e) => setSource(e.target.value)}>
+            <option value="">Select source</option>
+            <option value="reviews">Reviews</option>
+            <option value="support">Support</option>
+            <option value="surveys">Surveys</option>
+          </select>
 
-          <label>
-            CSV:&nbsp;
-            <input
-              type="file"
-              accept=".csv,text/csv"
-              onChange={(e) => setCsvFile(e.target.files?.[0] ?? null)}
-            />
-          </label>
-        </div>
-
-        <div>
-          <div>Or paste text:</div>
-          <textarea
-            value={rawText}
-            onChange={(e) => setRawText(e.target.value)}
-            rows={7}
-            style={{ width: "100%", marginTop: 6 }}
-            placeholder="Paste feedback here..."
+          <input
+            type="file"
+            accept=".csv,text/csv"
+            onChange={(e) => setCsvFile(e.target.files?.[0] ?? null)}
           />
         </div>
 
-        <div>
+        <textarea
+          value={rawText}
+          onChange={(e) => setRawText(e.target.value)}
+          rows={6}
+          placeholder="Or paste feedback here..."
+          style={{
+            width: "100%",
+            marginTop: 16,
+            padding: 8,
+          }}
+        />
+
+        <div style={{ marginTop: 16 }}>
           <button
             disabled={isUploading}
-            style={{ width: 180 }}
             onClick={async () => {
               setResultMsg("");
               setErrorMsg("");
 
-              // Validation: source is required
               if (!source) {
-                setErrorMsg("Please select a Source.");
+                setErrorMsg("Please select a source.");
                 return;
               }
 
@@ -300,19 +244,19 @@ export default function ProjectPage() {
               const hasText = rawText.trim().length > 0;
 
               if (!hasCsv && !hasText) {
-                setErrorMsg("Please upload a CSV or paste text.");
+                setErrorMsg("Upload CSV or paste text.");
                 return;
               }
 
               if (hasCsv && hasText) {
-                setErrorMsg("Please use either CSV or pasted text (not both).");
+                setErrorMsg("Use either CSV or text, not both.");
                 return;
               }
 
               setIsUploading(true);
 
               try {
-                let result: UploadResult;
+                let result;
 
                 if (csvFile) {
                   result = await uploadCsv(id, source, csvFile);
@@ -326,23 +270,29 @@ export default function ProjectPage() {
                   `Entries ingested: ${result.count} — Ready to analyze.`,
                 );
 
-                // refresh latest upload summary after successful upload
                 await loadLatestUploadSummary(id);
               } catch (e: unknown) {
-                const msg = e instanceof Error ? e.message : "Upload failed";
-                setErrorMsg(msg);
+                setErrorMsg(e instanceof Error ? e.message : "Upload failed");
               } finally {
                 setIsUploading(false);
               }
+            }}
+            style={{
+              padding: "8px 16px",
+              borderRadius: 8,
+              border: "1px solid #ccc",
             }}
           >
             {isUploading ? "Uploading..." : "Upload"}
           </button>
         </div>
 
-        {errorMsg && <div style={{ color: "crimson" }}>{errorMsg}</div>}
-        {resultMsg && <div>{resultMsg}</div>}
-      </div>
+        {errorMsg && (
+          <div style={{ marginTop: 8, color: "crimson" }}>{errorMsg}</div>
+        )}
+
+        {resultMsg && <div style={{ marginTop: 8 }}>{resultMsg}</div>}
+      </section>
     </div>
   );
 }

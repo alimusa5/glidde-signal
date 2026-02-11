@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
-import { normalizeText, splitRawText, dedupeExact } from "@/lib/normalize";
+import { normalizeText, dedupeExact } from "@/lib/normalize";
 
 async function insertEntriesInChunks(
   supabase: SupabaseClient,
@@ -11,7 +11,7 @@ async function insertEntriesInChunks(
     project_id: string;
     user_id: string;
     source: string;
-    text: string;
+    content: string;
   }>,
   chunkSize = 500,
 ) {
@@ -22,9 +22,18 @@ async function insertEntriesInChunks(
   }
 }
 
+function splitIntoLines(text: string) {
+  // Split on newlines; keep it simple for Day 3
+  // (Normalization will later remove noise like signatures/extra whitespace)
+  return text
+    .split(/\r?\n+/g)
+    .map((t) => t.trim())
+    .filter((t) => t.length > 0);
+}
+
 export async function POST(req: Request) {
   try {
-    // 1) Read Bearer token from Authorization header
+    // 1) Read Bearer token
     const authHeader = req.headers.get("authorization") ?? "";
     if (!authHeader.startsWith("Bearer ")) {
       return NextResponse.json(
@@ -38,7 +47,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "Empty token" }, { status: 401 });
     }
 
-    // 2) Create Supabase client that runs queries as the user (RLS enforced)
+    // 2) Create Supabase client as the user (RLS enforced)
     const supabase = createClient(
       process.env.NEXT_PUBLIC_SUPABASE_URL!,
       process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
@@ -47,7 +56,7 @@ export async function POST(req: Request) {
       },
     );
 
-    // 3) Verify user explicitly using token
+    // 3) Verify user via token
     const { data: userData, error: userErr } =
       await supabase.auth.getUser(token);
     const user = userData.user;
@@ -60,36 +69,23 @@ export async function POST(req: Request) {
     }
 
     // 4) Parse JSON body
-    const body: unknown = await req.json();
-    if (typeof body !== "object" || body === null) {
-      return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
-    }
+    const body = await req.json().catch(() => null);
+    const projectId = String(body?.projectId ?? "");
+    const source = String(body?.source ?? "");
+    const text = String(body?.text ?? "");
 
-    const { projectId, source, text } = body as {
-      projectId?: unknown;
-      source?: unknown;
-      text?: unknown;
-    };
-
-    const projectIdStr = typeof projectId === "string" ? projectId : "";
-    const sourceStr = typeof source === "string" ? source : "";
-    const textStr = typeof text === "string" ? text : "";
-
-    if (!projectIdStr || !sourceStr) {
+    if (!projectId || !source || !text.trim()) {
       return NextResponse.json(
-        { error: "Missing projectId or source" },
+        { error: "Missing projectId, source, or text" },
         { status: 400 },
       );
     }
-    if (!textStr.trim()) {
-      return NextResponse.json({ error: "Missing text" }, { status: 400 });
-    }
 
-    // 5) Ensure user owns the project
+    // 5) Ensure user owns project
     const { data: proj, error: projErr } = await supabase
       .from("projects")
       .select("id")
-      .eq("id", projectIdStr)
+      .eq("id", projectId)
       .eq("user_id", user.id)
       .single();
 
@@ -97,13 +93,16 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "Project not found" }, { status: 404 });
     }
 
-    // 6) Split → normalize → dedupe
-    const parts = splitRawText(textStr).map(normalizeText);
-    const unique = dedupeExact(parts.filter((t) => t.length > 0));
+    // 6) Normalize + dedupe
+    const lines = splitIntoLines(text);
+    const normalized = lines
+      .map((t) => normalizeText(t))
+      .filter((t) => t.length > 0);
+    const unique = dedupeExact(normalized);
 
     if (unique.length === 0) {
       return NextResponse.json(
-        { error: "No valid entries found" },
+        { error: "No valid feedback lines found" },
         { status: 400 },
       );
     }
@@ -112,9 +111,9 @@ export async function POST(req: Request) {
     const { data: upload, error: uploadErr } = await supabase
       .from("uploads")
       .insert({
-        project_id: projectIdStr,
+        project_id: projectId,
         user_id: user.id,
-        source: sourceStr,
+        source,
         original_filename: null,
       })
       .select("id")
@@ -127,13 +126,13 @@ export async function POST(req: Request) {
       );
     }
 
-    // 8) Insert entries
-    const entryRows = unique.map((t) => ({
+    // 8) Insert entries (content, not text)
+    const entryRows = unique.map((content) => ({
       upload_id: upload.id,
-      project_id: projectIdStr,
+      project_id: projectId,
       user_id: user.id,
-      source: sourceStr,
-      text: t,
+      source,
+      content,
     }));
 
     await insertEntriesInChunks(supabase, entryRows);
