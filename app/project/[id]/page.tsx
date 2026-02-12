@@ -14,6 +14,15 @@ type LatestUploadSummary = {
   count: number;
 };
 
+type RunHistoryItem = {
+  id: string;
+  scope: "upload" | "project";
+  source_filter: "all" | "reviews" | "support" | "surveys";
+  entry_count: number;
+  status: "queued" | "processing" | "completed" | "failed";
+  created_at: string;
+};
+
 export default function ProjectPage() {
   const router = useRouter();
   const params = useParams<{ id: string }>();
@@ -32,6 +41,15 @@ export default function ProjectPage() {
 
   const [latest, setLatest] = useState<LatestUploadSummary | null>(null);
   const [loadingLatest, setLoadingLatest] = useState(false);
+
+  // Step 1 additions: Run entry point UI state
+  const [isCreatingRun, setIsCreatingRun] = useState(false);
+  const [runMsg, setRunMsg] = useState<string>("");
+  const [runError, setRunError] = useState<string>("");
+
+  // Step 3 additions: Run History state
+  const [runs, setRuns] = useState<RunHistoryItem[]>([]);
+  const [loadingRuns, setLoadingRuns] = useState(false);
 
   async function getAccessToken(): Promise<string> {
     const { data, error } = await supabase.auth.getSession();
@@ -74,6 +92,27 @@ export default function ProjectPage() {
     }
   }
 
+  // Step 3: Load run history list
+  async function loadRunHistory(projectId: string) {
+    setLoadingRuns(true);
+    try {
+      const { data: userData } = await supabase.auth.getUser();
+      if (!userData.user) return;
+
+      const { data } = await supabase
+        .from("runs")
+        .select("id, scope, source_filter, entry_count, status, created_at")
+        .eq("project_id", projectId)
+        .eq("user_id", userData.user.id)
+        .order("created_at", { ascending: false })
+        .limit(10);
+
+      setRuns((data ?? []) as RunHistoryItem[]);
+    } finally {
+      setLoadingRuns(false);
+    }
+  }
+
   async function uploadCsv(projectId: string, src: string, file: File) {
     const token = await getAccessToken();
 
@@ -110,6 +149,29 @@ export default function ProjectPage() {
     return data as UploadResult;
   }
 
+  // Step 1 addition: create Run API call
+  async function createRun(projectId: string) {
+    const token = await getAccessToken();
+
+    const res = await fetch("/api/runs/create", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        projectId,
+        scope: "upload", // Day 4 default: latest upload snapshot
+        sourceFilter: "all", // Day 4 default
+        // uploadId intentionally omitted → API uses latest upload
+      }),
+    });
+
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data?.error ?? "Unable to create a run.");
+    return data as { runId: string };
+  }
+
   useEffect(() => {
     async function load() {
       const { data: userData } = await supabase.auth.getUser();
@@ -131,7 +193,9 @@ export default function ProjectPage() {
 
       setName(data.name);
       setLoading(false);
+
       await loadLatestUploadSummary(id);
+      await loadRunHistory(id);
     }
 
     load();
@@ -166,8 +230,15 @@ export default function ProjectPage() {
             <div>Uploaded: {formatTime(latest.createdAt)}</div>
             <div style={{ marginTop: 4 }}>Status: Ready to analyze</div>
 
-            {/* 👇 Step 1: View Feedback Doorway */}
-            <div style={{ marginTop: 16 }}>
+            {/* 👇 Step 1: View Feedback + Generate Insights (Run entry point) */}
+            <div
+              style={{
+                marginTop: 16,
+                display: "flex",
+                gap: 10,
+                flexWrap: "wrap",
+              }}
+            >
               <Link
                 href={`/project/${id}/feedback`}
                 style={{
@@ -181,10 +252,102 @@ export default function ProjectPage() {
               >
                 View Feedback
               </Link>
+
+              <button
+                disabled={isCreatingRun || !latest}
+                onClick={async () => {
+                  setRunMsg("");
+                  setRunError("");
+
+                  if (!latest) {
+                    setRunError(
+                      "No uploads yet. Upload feedback to generate insights.",
+                    );
+                    return;
+                  }
+
+                  setIsCreatingRun(true);
+
+                  try {
+                    const { runId } = await createRun(id);
+                    // Step 3 polish: refresh history before leaving (useful when user comes back)
+                    await loadRunHistory(id);
+                    router.push(`/project/${id}/runs/${runId}`);
+                  } catch (e: unknown) {
+                    setRunError(
+                      e instanceof Error
+                        ? e.message
+                        : "Unable to create a run.",
+                    );
+                  } finally {
+                    setIsCreatingRun(false);
+                  }
+                }}
+                style={{
+                  padding: "8px 14px",
+                  borderRadius: 8,
+                  border: "1px solid #ccc",
+                  background: isCreatingRun || !latest ? "#f3f3f3" : "white",
+                  fontSize: 14,
+                  cursor: isCreatingRun || !latest ? "not-allowed" : "pointer",
+                }}
+              >
+                {isCreatingRun ? "Creating run..." : "Generate Insights"}
+              </button>
             </div>
+
+            {runError && (
+              <div style={{ marginTop: 10, color: "crimson" }}>{runError}</div>
+            )}
+
+            {runMsg && <div style={{ marginTop: 10 }}>{runMsg}</div>}
           </>
         ) : (
-          <div>No uploads yet.</div>
+          <div>No uploads yet. Upload feedback to generate insights.</div>
+        )}
+      </section>
+
+      {/* Run History */}
+      <section
+        style={{
+          marginTop: 24,
+          border: "1px solid #e5e5e5",
+          borderRadius: 12,
+          padding: 20,
+        }}
+      >
+        <div style={{ fontWeight: 600, marginBottom: 12 }}>Run History</div>
+
+        {loadingRuns ? (
+          <div>Loading…</div>
+        ) : runs.length === 0 ? (
+          <div style={{ color: "#666" }}>No runs yet.</div>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            {runs.map((r) => (
+              <Link
+                key={r.id}
+                href={`/project/${id}/runs/${r.id}`}
+                style={{
+                  textDecoration: "none",
+                  border: "1px solid #eee",
+                  borderRadius: 10,
+                  padding: 12,
+                  color: "#111",
+                }}
+              >
+                <div style={{ fontWeight: 600 }}>
+                  {new Date(r.created_at).toLocaleString()}
+                </div>
+                <div style={{ color: "#444", marginTop: 4, fontSize: 14 }}>
+                  Scope:{" "}
+                  {r.scope === "project" ? "Project-wide" : "Single upload"} •
+                  Source: {r.source_filter} • Entries: {r.entry_count} • Status:{" "}
+                  {r.status}
+                </div>
+              </Link>
+            ))}
+          </div>
         )}
       </section>
 
@@ -256,7 +419,7 @@ export default function ProjectPage() {
               setIsUploading(true);
 
               try {
-                let result;
+                let result: UploadResult;
 
                 if (csvFile) {
                   result = await uploadCsv(id, source, csvFile);
