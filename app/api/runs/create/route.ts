@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
+import { processRun } from "@/lib/runs/processRun";
 
 const supabaseAdmin = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -124,7 +125,7 @@ export async function POST(req: Request) {
     );
   }
 
-  // 4) Create run with Day 4 lifecycle: queued → processing → completed (immediate)
+  // 4) Create run with lifecycle: queued → processing → completed/failed
   const { data: run, error: runErr } = await supabaseAdmin
     .from("runs")
     .insert({
@@ -146,14 +147,13 @@ export async function POST(req: Request) {
     );
   }
 
-  // Immediately advance status (no background jobs yet)
+  // 5) Mark processing
   const { error: processingErr } = await supabaseAdmin
     .from("runs")
     .update({ status: "processing" })
     .eq("id", run.id);
 
   if (processingErr) {
-    // Not fatal for Day 4, but mark failed so UI is honest
     await supabaseAdmin
       .from("runs")
       .update({ status: "failed" })
@@ -164,6 +164,21 @@ export async function POST(req: Request) {
     );
   }
 
+  // 6) Day 5: Actually process the run and write Top 5 problems to run_problems
+  try {
+    await processRun(run.id);
+  } catch (e: unknown) {
+    await supabaseAdmin
+      .from("runs")
+      .update({ status: "failed" })
+      .eq("id", run.id);
+    return NextResponse.json(
+      { error: e instanceof Error ? e.message : "Run processing failed." },
+      { status: 500 },
+    );
+  }
+
+  // 7) Mark completed
   const { error: completedErr } = await supabaseAdmin
     .from("runs")
     .update({ status: "completed" })
@@ -175,7 +190,7 @@ export async function POST(req: Request) {
       .update({ status: "failed" })
       .eq("id", run.id);
     return NextResponse.json(
-      { error: "Run created but failed to complete." },
+      { error: "Run processed but failed to complete." },
       { status: 500 },
     );
   }

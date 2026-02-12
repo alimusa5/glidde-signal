@@ -23,6 +23,23 @@ type UploadInfo = {
   created_at: string;
 };
 
+type RunProblem = {
+  id: string;
+  run_id: string;
+  rank: number;
+  title: string;
+  summary: string | null;
+  mention_count: number;
+  sources: string[]; // text[] in Postgres comes back as string[]
+  quotes: Array<{
+    text: string;
+    source: string;
+    entry_id?: string;
+    upload_id?: string;
+  }>;
+  created_at: string;
+};
+
 export default function RunDetailsPage() {
   const router = useRouter();
   const params = useParams<{ id: string; runId: string }>();
@@ -32,6 +49,9 @@ export default function RunDetailsPage() {
   const [loading, setLoading] = useState(true);
   const [run, setRun] = useState<RunRecord | null>(null);
   const [upload, setUpload] = useState<UploadInfo | null>(null);
+  const [problems, setProblems] = useState<RunProblem[]>([]);
+  const [loadingProblems, setLoadingProblems] = useState(false);
+
   const [errorMsg, setErrorMsg] = useState("");
 
   const formatTime = (iso: string) => new Date(iso).toLocaleString();
@@ -40,6 +60,7 @@ export default function RunDetailsPage() {
     async function load() {
       setLoading(true);
       setErrorMsg("");
+      setProblems([]);
 
       // Auth gate
       const { data: userData } = await supabase.auth.getUser();
@@ -82,6 +103,30 @@ export default function RunDetailsPage() {
           .maybeSingle();
 
         if (u) setUpload(u as UploadInfo);
+      } else {
+        setUpload(null);
+      }
+
+      // Fetch Top Problems if run is completed
+      if (r.status === "completed") {
+        setLoadingProblems(true);
+        const { data: p, error: pErr } = await supabase
+          .from("run_problems")
+          .select(
+            "id, run_id, rank, title, summary, mention_count, sources, quotes, created_at",
+          )
+          .eq("run_id", runId)
+          .order("rank", { ascending: true });
+
+        if (pErr) {
+          setErrorMsg("Run loaded, but failed to load problems.");
+          setLoadingProblems(false);
+          setLoading(false);
+          return;
+        }
+
+        setProblems((p ?? []) as RunProblem[]);
+        setLoadingProblems(false);
       }
 
       setLoading(false);
@@ -124,6 +169,7 @@ export default function RunDetailsPage() {
         Run Details
       </h1>
 
+      {/* Snapshot Metadata */}
       <section
         style={{
           marginTop: 20,
@@ -163,8 +209,106 @@ export default function RunDetailsPage() {
         )}
 
         <div style={{ marginTop: 14, color: "#666", fontSize: 13 }}>
-          This run is a saved snapshot. Insights will appear in later days.
+          This run is a saved snapshot. Insights are generated and stored for
+          this run.
         </div>
+      </section>
+
+      {/* Top 5 Problems */}
+      <section
+        style={{
+          marginTop: 20,
+          border: "1px solid #e5e5e5",
+          borderRadius: 12,
+          padding: 20,
+        }}
+      >
+        <div style={{ fontWeight: 600, marginBottom: 12 }}>Top Problems</div>
+
+        {run.status === "queued" || run.status === "processing" ? (
+          <div style={{ color: "#666" }}>
+            This run is processing. Refresh in a moment.
+          </div>
+        ) : run.status === "failed" ? (
+          <div style={{ color: "crimson" }}>
+            This run failed. Try generating insights again.
+          </div>
+        ) : loadingProblems ? (
+          <div>Loading…</div>
+        ) : problems.length === 0 ? (
+          <div style={{ color: "#666" }}>
+            No problems generated for this run yet.
+          </div>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            {problems.map((p) => (
+              <div
+                key={p.id}
+                style={{
+                  border: "1px solid #eee",
+                  borderRadius: 12,
+                  padding: 14,
+                  background: "#fafafa",
+                }}
+              >
+                <div style={{ fontWeight: 700 }}>
+                  #{p.rank} — {p.title}
+                </div>
+
+                <div style={{ marginTop: 6, color: "#444", fontSize: 14 }}>
+                  Mentioned by <b>{p.mention_count}</b>{" "}
+                  {p.mention_count === 1 ? "entry" : "entries"} • Seen in:{" "}
+                  {p.sources?.length ? p.sources.join(", ") : "—"}
+                </div>
+
+                {p.summary && (
+                  <div style={{ marginTop: 8, color: "#333", fontSize: 14 }}>
+                    {p.summary}
+                  </div>
+                )}
+
+                <div style={{ marginTop: 10 }}>
+                  <div style={{ fontWeight: 600, fontSize: 13 }}>
+                    Real customer quotes
+                  </div>
+
+                  {Array.isArray(p.quotes) && p.quotes.length > 0 ? (
+                    <div
+                      style={{
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: 8,
+                        marginTop: 6,
+                      }}
+                    >
+                      {p.quotes.slice(0, 3).map((q, idx) => (
+                        <div
+                          key={idx}
+                          style={{
+                            borderLeft: "3px solid #ddd",
+                            paddingLeft: 10,
+                            color: "#333",
+                            fontSize: 14,
+                            lineHeight: 1.4,
+                          }}
+                        >
+                          <div style={{ marginBottom: 4 }}>“{q.text}”</div>
+                          <div style={{ color: "#666", fontSize: 12 }}>
+                            Source: {q.source}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div style={{ marginTop: 6, color: "#666", fontSize: 14 }}>
+                      No quotes available.
+                    </div>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
       </section>
     </div>
   );
