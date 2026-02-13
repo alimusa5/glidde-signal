@@ -110,9 +110,34 @@ function normalizeText(input: string) {
 function detectBucketKey(textRaw: string): BucketKey {
   const text = normalizeText(textRaw);
 
+  // ✅ Priority override 1: TRUE crash/exception signals only
+  const crashPriority =
+    /\b(crash|crashed|crashing|exception|stack trace|segfault|panic|fatal error)\b|(?:\b(error)\b.*\b(500|502|503|504|429|404|403)\b)|(?:\b(500|502|503|504|429|404|403)\b)/;
+
+  if (crashPriority.test(text)) return "crash_bug";
+
+  // ✅ Priority override 2: navigation / findability issues are UI/UX
+  const findability =
+    /\b(can't find|cant find|cannot find|hard to find|where is|where do i|hidden|hard to locate|couldn't find|could not find)\b/;
+
+  if (findability.test(text)) return "ui_ux";
+
+  // ✅ Priority override 3: general UI/UX friction, but don't steal pure pricing confusion
+  const uiPriority =
+    /\b(confusing|confused|hard to use|difficult|too many steps|too many clicks|navigation|layout|unclear|not clear|misleading)\b/;
+
+  const pricingStrong =
+    /\b(pricing|price|plan|plans|tier|tiers|invoice|invoic(e|ed)|receipt|refund|refunded|chargeback|charged|billing|billed|renew|renewal|upgrade|downgrade|trial)\b/;
+
+  // Note: subscription/cancel intentionally NOT included here,
+  // because those often appear in "can't find cancel subscription" UX issues.
+  if (uiPriority.test(text) && !pricingStrong.test(text)) return "ui_ux";
+
+  // ✅ Otherwise, fall back to normal rules (order-based)
   for (const r of RULES) {
     if (r.match.test(text)) return r.key;
   }
+
   return "other";
 }
 
@@ -173,6 +198,65 @@ function pickTopQuotesForBucket(
   }));
 }
 
+// ---------------- Day 6: Feature-Level Pain Map ----------------
+
+// Rule-based feature detection (MVP). Order matters — specific first.
+const FEATURE_RULES: Array<{ feature: string; match: RegExp }> = [
+  {
+    feature: "Checkout",
+    match: /\b(checkout|cart|basket|buy now|place order|order|ordered)\b/,
+  },
+  {
+    feature: "Payments",
+    match:
+      /\b(payment|payments|pay|paid|paying|card|credit card|debit card|visa|mastercard|amex|paypal|apple pay|google pay|stripe|gateway|transaction|chargeback)\b/,
+  },
+  {
+    feature: "Pricing",
+    match:
+      /\b(pricing|price|prices|plan|plans|tier|tiers|package|packages|invoice|invoic(e|ed)|receipt|refund|refunded|billing|billed|renew|renewal|upgrade|downgrade|trial)\b/,
+  },
+  {
+    feature: "Login",
+    match:
+      /\b(login|log in|sign in|signin|sign-in|password|passcode|otp|2fa|two[- ]factor|mfa|reset password|forgot password|auth|authentication|magic link|session|token)\b/,
+  },
+  {
+    feature: "Mobile",
+    match:
+      /\b(mobile|phone|tablet|android|ios|iphone|ipad|apk|play store|app store|touch id|face id|biometric)\b/,
+  },
+  {
+    feature: "Performance",
+    match:
+      /\b(slow|sluggish|lag|laggy|timeout|timed out|loading|load time|freeze|freezing|stuck|unresponsive|latency|delay|delayed)\b/,
+  },
+  {
+    feature: "Support",
+    match:
+      /\b(support|ticket|tickets|agent|help desk|helpdesk|customer service|response time|no response|waiting|escalat(e|ed))\b/,
+  },
+  {
+    feature: "Onboarding",
+    match:
+      /\b(onboarding|setup|tutorial|get started|getting started|walkthrough)\b/,
+  },
+  {
+    feature: "Notifications",
+    match:
+      /\b(notification|notifications|push notification|email notification)\b/,
+  },
+];
+
+function detectFeatures(textRaw: string): string[] {
+  const t = normalizeText(textRaw);
+  const hits: string[] = [];
+  for (const r of FEATURE_RULES) {
+    if (r.match.test(t)) hits.push(r.feature);
+  }
+  return Array.from(new Set(hits));
+}
+
 export async function processRun(runId: string) {
   // 1) Load the run
   const { data: run, error: runErr } = await supabaseAdmin
@@ -216,9 +300,10 @@ export async function processRun(runId: string) {
     (e) => typeof e.text === "string" && e.text.trim().length > 0,
   );
 
-  // 3) If no entries, clear problems and exit
+  // 3) If no entries, clear problems/features and exit
   if (feedback.length === 0) {
     await supabaseAdmin.from("run_problems").delete().eq("run_id", runId);
+    await supabaseAdmin.from("run_features").delete().eq("run_id", runId);
     return { created: 0 };
   }
 
@@ -279,5 +364,72 @@ export async function processRun(runId: string) {
     throw new Error(`Failed to write run problems: ${insertErr.message}`);
   }
 
-  return { created: rows.length };
+  // ---------------- Day 6: write run_features (Feature-Level Pain Map) ----------------
+
+  // Map entry_id -> problem title (based on bucket titles)
+  const entryIdToProblemTitle = new Map<string, string>();
+  for (const b of top) {
+    for (const entryId of b.entryIds) {
+      entryIdToProblemTitle.set(entryId, b.title);
+    }
+  }
+
+  // Aggregate per feature
+  const featureAgg = new Map<
+    string,
+    { mention_count: number; problemCounts: Map<string, number> }
+  >();
+
+  for (const e of feedback) {
+    const feats = detectFeatures(e.text);
+    if (feats.length === 0) continue;
+
+    const pTitle = entryIdToProblemTitle.get(e.id) ?? "Other Common Issues";
+
+    for (const f of feats) {
+      if (!featureAgg.has(f)) {
+        featureAgg.set(f, { mention_count: 0, problemCounts: new Map() });
+      }
+      const agg = featureAgg.get(f)!;
+      agg.mention_count += 1;
+      agg.problemCounts.set(pTitle, (agg.problemCounts.get(pTitle) ?? 0) + 1);
+    }
+  }
+
+  const featureRows = Array.from(featureAgg.entries())
+    .map(([feature, agg]) => {
+      let dominant_problem: string | null = null;
+      let best = 0;
+
+      for (const [pTitle, cnt] of agg.problemCounts.entries()) {
+        if (cnt > best) {
+          best = cnt;
+          dominant_problem = pTitle;
+        }
+      }
+
+      return {
+        run_id: runId,
+        feature,
+        mention_count: agg.mention_count,
+        dominant_problem,
+      };
+    })
+    .sort((a, b) => b.mention_count - a.mention_count)
+    .slice(0, 12);
+
+  // Idempotent write for this run
+  await supabaseAdmin.from("run_features").delete().eq("run_id", runId);
+
+  if (featureRows.length > 0) {
+    const { error: featErr } = await supabaseAdmin
+      .from("run_features")
+      .insert(featureRows);
+
+    if (featErr) {
+      throw new Error(`Failed to write run features: ${featErr.message}`);
+    }
+  }
+
+  return { created: rows.length, features: featureRows.length };
 }

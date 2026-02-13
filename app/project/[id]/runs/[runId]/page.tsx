@@ -40,6 +40,15 @@ type RunProblem = {
   created_at: string;
 };
 
+type RunFeature = {
+  id: string;
+  run_id: string;
+  feature: string;
+  mention_count: number;
+  dominant_problem: string | null;
+  created_at: string;
+};
+
 export default function RunDetailsPage() {
   const router = useRouter();
   const params = useParams<{ id: string; runId: string }>();
@@ -49,8 +58,13 @@ export default function RunDetailsPage() {
   const [loading, setLoading] = useState(true);
   const [run, setRun] = useState<RunRecord | null>(null);
   const [upload, setUpload] = useState<UploadInfo | null>(null);
+
   const [problems, setProblems] = useState<RunProblem[]>([]);
   const [loadingProblems, setLoadingProblems] = useState(false);
+
+  // ✅ Day 6: Feature-level pain map state
+  const [features, setFeatures] = useState<RunFeature[]>([]);
+  const [loadingFeatures, setLoadingFeatures] = useState(false);
 
   const [errorMsg, setErrorMsg] = useState("");
 
@@ -61,6 +75,7 @@ export default function RunDetailsPage() {
       setLoading(true);
       setErrorMsg("");
       setProblems([]);
+      setFeatures([]);
 
       // Auth gate
       const { data: userData } = await supabase.auth.getUser();
@@ -107,8 +122,9 @@ export default function RunDetailsPage() {
         setUpload(null);
       }
 
-      // Fetch Top Problems if run is completed
+      // Fetch Problems + Features only when completed
       if (r.status === "completed") {
+        // ✅ Top Problems
         setLoadingProblems(true);
         const { data: p, error: pErr } = await supabase
           .from("run_problems")
@@ -127,6 +143,24 @@ export default function RunDetailsPage() {
 
         setProblems((p ?? []) as RunProblem[]);
         setLoadingProblems(false);
+
+        // ✅ Day 6: Feature-Level Pain Map
+        setLoadingFeatures(true);
+        const { data: f, error: fErr } = await supabase
+          .from("run_features")
+          .select(
+            "id, run_id, feature, mention_count, dominant_problem, created_at",
+          )
+          .eq("run_id", runId)
+          .order("mention_count", { ascending: false });
+
+        if (fErr) {
+          // Don't fail whole page — just show empty features section
+          setFeatures([]);
+        } else {
+          setFeatures((f ?? []) as RunFeature[]);
+        }
+        setLoadingFeatures(false);
       }
 
       setLoading(false);
@@ -307,6 +341,109 @@ export default function RunDetailsPage() {
                 </div>
               </div>
             ))}
+          </div>
+        )}
+      </section>
+
+      {/* ✅ Day 6: Feature-Level Pain Map */}
+      <section
+        style={{
+          marginTop: 20,
+          border: "1px solid #e5e5e5",
+          borderRadius: 12,
+          padding: 20,
+        }}
+      >
+        <div style={{ fontWeight: 600, marginBottom: 6 }}>
+          Feature-Level Pain Map
+        </div>
+
+        <div style={{ color: "#666", fontSize: 13, marginBottom: 12 }}>
+          Counts are feature mentions. One entry can mention multiple features.
+        </div>
+
+        {run.status === "queued" || run.status === "processing" ? (
+          <div style={{ color: "#666" }}>
+            This run is processing. Refresh in a moment.
+          </div>
+        ) : run.status === "failed" ? (
+          <div style={{ color: "crimson" }}>
+            This run failed. Try generating insights again.
+          </div>
+        ) : loadingFeatures ? (
+          <div>Loading…</div>
+        ) : features.length === 0 ? (
+          <div style={{ color: "#666" }}>No feature mentions found.</div>
+        ) : (
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse" }}>
+              <thead>
+                <tr>
+                  <th
+                    style={{
+                      textAlign: "left",
+                      fontSize: 13,
+                      padding: "8px 6px",
+                      borderBottom: "1px solid #eee",
+                    }}
+                  >
+                    Feature
+                  </th>
+                  <th
+                    style={{
+                      textAlign: "left",
+                      fontSize: 13,
+                      padding: "8px 6px",
+                      borderBottom: "1px solid #eee",
+                      width: 90,
+                    }}
+                  >
+                    Mentions
+                  </th>
+                  <th
+                    style={{
+                      textAlign: "left",
+                      fontSize: 13,
+                      padding: "8px 6px",
+                      borderBottom: "1px solid #eee",
+                    }}
+                  >
+                    Dominant Issue
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {features.map((f) => (
+                  <tr key={f.id}>
+                    <td
+                      style={{
+                        padding: "10px 6px",
+                        borderBottom: "1px solid #f2f2f2",
+                      }}
+                    >
+                      {f.feature}
+                    </td>
+                    <td
+                      style={{
+                        padding: "10px 6px",
+                        borderBottom: "1px solid #f2f2f2",
+                      }}
+                    >
+                      {f.mention_count}
+                    </td>
+                    <td
+                      style={{
+                        padding: "10px 6px",
+                        borderBottom: "1px solid #f2f2f2",
+                        color: "#444",
+                      }}
+                    >
+                      {f.dominant_problem ?? "—"}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         )}
       </section>
