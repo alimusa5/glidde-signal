@@ -49,6 +49,68 @@ type RunFeature = {
   created_at: string;
 };
 
+type DeltaItem = {
+  title: string;
+  prev_count?: number;
+  curr_count?: number;
+  delta?: number;
+};
+
+type RunDeltaRow = {
+  new_problems: DeltaItem[];
+  worsening: DeltaItem[];
+  improving: DeltaItem[];
+  resolved: DeltaItem[];
+};
+
+function formatDeltaItem(item: DeltaItem, kind: "new" | "resolved" | "change") {
+  if (kind === "new") return `New: ${item.title}`;
+  if (kind === "resolved") return item.title;
+
+  const d = item.delta ?? 0;
+  const abs = Math.abs(d);
+  const word = abs === 1 ? "mention" : "mentions";
+  const sign = d > 0 ? `+${d}` : `${d}`;
+  return `${item.title} (${sign} ${word})`;
+}
+
+function DeltaList({
+  title,
+  items,
+  kind,
+}: {
+  title: string;
+  items: DeltaItem[];
+  kind: "new" | "resolved" | "change";
+}) {
+  if (!items || items.length === 0) {
+    return (
+      <div>
+        <div style={{ fontWeight: 600, fontSize: 14 }}>{title}</div>
+        <div style={{ marginTop: 6, color: "#666", fontSize: 14 }}>
+          No changes.
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <div style={{ fontWeight: 600, fontSize: 14 }}>{title}</div>
+      <ul style={{ marginTop: 8, paddingLeft: 18 }}>
+        {items.map((it, idx) => (
+          <li
+            key={`${it.title}-${idx}`}
+            style={{ marginBottom: 6, color: "#333", fontSize: 14 }}
+          >
+            {formatDeltaItem(it, kind)}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 export default function RunDetailsPage() {
   const router = useRouter();
   const params = useParams<{ id: string; runId: string }>();
@@ -66,6 +128,10 @@ export default function RunDetailsPage() {
   const [features, setFeatures] = useState<RunFeature[]>([]);
   const [loadingFeatures, setLoadingFeatures] = useState(false);
 
+  // ✅ Day 7: Run deltas state
+  const [deltaRow, setDeltaRow] = useState<RunDeltaRow | null>(null);
+  const [loadingDeltas, setLoadingDeltas] = useState(false);
+
   const [errorMsg, setErrorMsg] = useState("");
 
   const formatTime = (iso: string) => new Date(iso).toLocaleString();
@@ -76,6 +142,7 @@ export default function RunDetailsPage() {
       setErrorMsg("");
       setProblems([]);
       setFeatures([]);
+      setDeltaRow(null);
 
       // Auth gate
       const { data: userData } = await supabase.auth.getUser();
@@ -122,7 +189,7 @@ export default function RunDetailsPage() {
         setUpload(null);
       }
 
-      // Fetch Problems + Features only when completed
+      // Fetch Problems + Features + Deltas only when completed
       if (r.status === "completed") {
         // ✅ Top Problems
         setLoadingProblems(true);
@@ -161,6 +228,22 @@ export default function RunDetailsPage() {
           setFeatures((f ?? []) as RunFeature[]);
         }
         setLoadingFeatures(false);
+
+        // ✅ Day 7: What changed since last run
+        setLoadingDeltas(true);
+        const { data: d, error: dErr } = await supabase
+          .from("run_deltas")
+          .select("new_problems, worsening, improving, resolved")
+          .eq("current_run_id", runId)
+          .maybeSingle();
+
+        if (dErr) {
+          // Don't fail whole page — calm empty state instead
+          setDeltaRow(null);
+        } else {
+          setDeltaRow((d as RunDeltaRow) ?? null);
+        }
+        setLoadingDeltas(false);
       }
 
       setLoading(false);
@@ -444,6 +527,64 @@ export default function RunDetailsPage() {
                 ))}
               </tbody>
             </table>
+          </div>
+        )}
+      </section>
+
+      {/* ✅ Day 7: What changed since last run */}
+      <section
+        style={{
+          marginTop: 20,
+          border: "1px solid #e5e5e5",
+          borderRadius: 12,
+          padding: 20,
+          background: "#fafafa",
+        }}
+      >
+        <div style={{ fontWeight: 600, marginBottom: 12 }}>
+          What changed since last run
+        </div>
+
+        {run.status === "queued" || run.status === "processing" ? (
+          <div style={{ color: "#666" }}>
+            This run is processing. Refresh in a moment.
+          </div>
+        ) : run.status === "failed" ? (
+          <div style={{ color: "crimson" }}>
+            This run failed. Try generating insights again.
+          </div>
+        ) : loadingDeltas ? (
+          <div>Loading…</div>
+        ) : !deltaRow ? (
+          <div style={{ color: "#666" }}>No previous run to compare yet.</div>
+        ) : (
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "1fr 1fr",
+              gap: 18,
+            }}
+          >
+            <DeltaList
+              title="🆕 New problems"
+              items={deltaRow.new_problems}
+              kind="new"
+            />
+            <DeltaList
+              title="📈 Getting worse"
+              items={deltaRow.worsening}
+              kind="change"
+            />
+            <DeltaList
+              title="📉 Improving"
+              items={deltaRow.improving}
+              kind="change"
+            />
+            <DeltaList
+              title="✅ Resolved"
+              items={deltaRow.resolved}
+              kind="resolved"
+            />
           </div>
         )}
       </section>

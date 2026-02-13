@@ -40,6 +40,29 @@ type BucketKey =
   | "support"
   | "other";
 
+type DeltaItem = {
+  title: string;
+  prev_count?: number;
+  curr_count?: number;
+  delta?: number;
+};
+
+// Controls how many items you show per delta bucket (Top 3 or Top 5)
+const TOP_DELTA_ITEMS = 5;
+
+// For “resolved/new” correctness we must consider *all* bucket keys every time.
+const ALL_BUCKET_KEYS: BucketKey[] = [
+  "pricing",
+  "checkout",
+  "login",
+  "performance",
+  "crash_bug",
+  "ui_ux",
+  "mobile",
+  "support",
+  "other",
+];
+
 /**
  * Keyword rules (baseline MVP, deterministic).
  * IMPORTANT: order matters. We put PRICING before CHECKOUT to avoid "billing" overlap.
@@ -68,17 +91,19 @@ const RULES: Array<{ key: BucketKey; match: RegExp }> = [
   },
 
   // Mobile-specific: device/platform keywords + common mobile terms
+  // ✅ Fix: include notifications plural + push notifications
   {
     key: "mobile",
     match:
-      /\b(mobile|phone|tablet|android|ios|iphone|ipad|samsung|pixel|oneplus|apk|play store|app store|touch id|face id|biometric|push notification|notification)\b/,
+      /\b(mobile|phone|tablet|android|ios|iphone|ipad|samsung|pixel|oneplus|apk|play store|app store|touch id|face id|biometric|push notification|push notifications|notification|notifications)\b/,
   },
 
   // Performance: slow, lag, timeout, loading, freezes, hangs
+  // ✅ Fix: include "freezes"
   {
     key: "performance",
     match:
-      /\b(slow|sluggish|lag|laggy|performance|loading|load time|takes forever|timeout|timed out|hang|hanging|freeze|freezing|stuck|spinning|buffering|unresponsive|latency|delay|delayed|crashes on load)\b/,
+      /\b(slow|sluggish|lag|laggy|performance|loading|load time|takes forever|timeout|timed out|hang|hanging|freeze|freezes|freezing|stuck|spinning|buffering|unresponsive|latency|delay|delayed|crashes on load)\b/,
   },
 
   // Crash/Bug/Error: crash/crashed/crashing, error codes, broken flows
@@ -89,6 +114,7 @@ const RULES: Array<{ key: BucketKey; match: RegExp }> = [
   },
 
   // UI/UX: confusion, navigation, cannot find, hard to use, steps, onboarding friction
+  // ✅ Fix: smart quotes handled in normalizeText(), so can't vs can’t will match
   {
     key: "ui_ux",
     match:
@@ -103,8 +129,15 @@ const RULES: Array<{ key: BucketKey; match: RegExp }> = [
   },
 ];
 
+// ✅ Fix: normalize smart quotes + smart dashes so regex rules match reliably
 function normalizeText(input: string) {
-  return (input || "").toLowerCase().replace(/\s+/g, " ").trim();
+  return (input || "")
+    .toLowerCase()
+    .replace(/[’‘]/g, "'") // smart apostrophes → straight
+    .replace(/[“”]/g, '"') // smart quotes → straight
+    .replace(/[–—]/g, "-") // en/em dash → hyphen
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function detectBucketKey(textRaw: string): BucketKey {
@@ -226,10 +259,11 @@ const FEATURE_RULES: Array<{ feature: string; match: RegExp }> = [
     match:
       /\b(mobile|phone|tablet|android|ios|iphone|ipad|apk|play store|app store|touch id|face id|biometric)\b/,
   },
+  // ✅ Fix: include "freezes"
   {
     feature: "Performance",
     match:
-      /\b(slow|sluggish|lag|laggy|timeout|timed out|loading|load time|freeze|freezing|stuck|unresponsive|latency|delay|delayed)\b/,
+      /\b(slow|sluggish|lag|laggy|timeout|timed out|loading|load time|freeze|freezes|freezing|stuck|unresponsive|latency|delay|delayed)\b/,
   },
   {
     feature: "Support",
@@ -244,7 +278,7 @@ const FEATURE_RULES: Array<{ feature: string; match: RegExp }> = [
   {
     feature: "Notifications",
     match:
-      /\b(notification|notifications|push notification|email notification)\b/,
+      /\b(notification|notifications|push notification|push notifications|email notification)\b/,
   },
 ];
 
@@ -255,6 +289,121 @@ function detectFeatures(textRaw: string): string[] {
     if (r.match.test(t)) hits.push(r.feature);
   }
   return Array.from(new Set(hits));
+}
+
+// ---------------- Day 7: Run Deltas (improved) ----------------
+
+async function findPreviousCompletedRun(
+  projectId: string,
+  currentRunId: string,
+) {
+  const { data, error } = await supabaseAdmin
+    .from("runs")
+    .select(
+      "id, project_id, user_id, scope, upload_id, source_filter, created_at, status",
+    )
+    .eq("project_id", projectId)
+    .eq("status", "completed")
+    .neq("id", currentRunId)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error) throw error;
+  return (data as RunRow | null) ?? null;
+}
+
+async function loadFeedbackForRun(run: RunRow) {
+  let q = supabaseAdmin
+    .from("feedback_entries")
+    .select("id, text:content, source, upload_id");
+
+  if (run.scope === "upload") {
+    if (!run.upload_id) {
+      throw new Error("Previous run scope is upload but upload_id is missing.");
+    }
+    q = q.eq("upload_id", run.upload_id);
+  } else {
+    q = q.eq("project_id", run.project_id);
+  }
+
+  if (run.source_filter !== "all") {
+    q = q.eq("source", run.source_filter);
+  }
+
+  // same safety limit you already use
+  q = q.limit(2000);
+
+  const { data, error } = await q;
+  if (error) {
+    throw new Error(
+      `Failed to load feedback entries for previous run: ${error.message}`,
+    );
+  }
+
+  return ((data ?? []) as FeedbackEntry[]).filter(
+    (e) => typeof e.text === "string" && e.text.trim().length > 0,
+  );
+}
+
+function computeAllBucketCountsFromFeedback(feedback: FeedbackEntry[]) {
+  const counts = new Map<BucketKey, number>();
+  for (const k of ALL_BUCKET_KEYS) counts.set(k, 0);
+
+  for (const e of feedback) {
+    const key = detectBucketKey(e.text);
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+
+  return counts;
+}
+
+function computeDeltaBucketsFromCounts(
+  prevCounts: Map<BucketKey, number>,
+  currCounts: Map<BucketKey, number>,
+) {
+  const new_problems: DeltaItem[] = [];
+  const worsening: DeltaItem[] = [];
+  const improving: DeltaItem[] = [];
+  const resolved: DeltaItem[] = [];
+
+  for (const key of ALL_BUCKET_KEYS) {
+    const prev = prevCounts.get(key) ?? 0;
+    const curr = currCounts.get(key) ?? 0;
+    const title = bucketTitle(key);
+
+    if (prev === 0 && curr > 0) {
+      new_problems.push({ title, curr_count: curr });
+      continue;
+    }
+
+    if (prev > 0 && curr === 0) {
+      resolved.push({ title, prev_count: prev });
+      continue;
+    }
+
+    if (prev > 0 && curr > 0 && curr !== prev) {
+      const delta = curr - prev;
+      if (delta > 0) {
+        worsening.push({ title, prev_count: prev, curr_count: curr, delta });
+      } else {
+        improving.push({ title, prev_count: prev, curr_count: curr, delta }); // negative
+      }
+    }
+  }
+
+  // decision-first sorting + limiting to Top N per bucket
+  new_problems.sort((a, b) => (b.curr_count ?? 0) - (a.curr_count ?? 0));
+  worsening.sort((a, b) => (b.delta ?? 0) - (a.delta ?? 0));
+  improving.sort((a, b) => (a.delta ?? 0) - (b.delta ?? 0)); // most negative first
+  resolved.sort((a, b) => (b.prev_count ?? 0) - (a.prev_count ?? 0));
+
+  return {
+    new_problems: new_problems.slice(0, TOP_DELTA_ITEMS),
+    worsening: worsening.slice(0, TOP_DELTA_ITEMS),
+    improving: improving.slice(0, TOP_DELTA_ITEMS),
+    resolved: resolved.slice(0, TOP_DELTA_ITEMS),
+  };
 }
 
 export async function processRun(runId: string) {
@@ -300,14 +449,15 @@ export async function processRun(runId: string) {
     (e) => typeof e.text === "string" && e.text.trim().length > 0,
   );
 
-  // 3) If no entries, clear problems/features and exit
+  // 3) If no entries, clear problems/features/deltas and exit
   if (feedback.length === 0) {
     await supabaseAdmin.from("run_problems").delete().eq("run_id", runId);
     await supabaseAdmin.from("run_features").delete().eq("run_id", runId);
-    return { created: 0 };
+    await supabaseAdmin.from("run_deltas").delete().eq("current_run_id", runId);
+    return { created: 0, features: 0, deltas: false };
   }
 
-  // 4) Build buckets
+  // 4) Build buckets (used for Top Problems only)
   const buckets = new Map<BucketKey, ProblemBucket>();
 
   for (const e of feedback) {
@@ -334,7 +484,7 @@ export async function processRun(runId: string) {
     (a, b) => b.entryIds.length - a.entryIds.length,
   );
 
-  // Keep top 5
+  // Keep top 5 for run_problems (unchanged)
   const top = ranked.slice(0, 5);
 
   // 6) Prepare rows for insertion (with quote selection tied to bucket)
@@ -431,5 +581,53 @@ export async function processRun(runId: string) {
     }
   }
 
-  return { created: rows.length, features: featureRows.length };
+  // ---------------- Day 7 (updated): deltas computed from ALL buckets ----------------
+
+  let deltasSaved = false;
+
+  const prevRun = await findPreviousCompletedRun(r.project_id, runId);
+
+  if (!prevRun) {
+    // First run: ensure no stale delta row exists for this run
+    await supabaseAdmin.from("run_deltas").delete().eq("current_run_id", runId);
+  } else {
+    // Load previous run's feedback and compute counts
+    const prevFeedback = await loadFeedbackForRun(prevRun);
+    const prevCounts = computeAllBucketCountsFromFeedback(prevFeedback);
+
+    // Current run counts computed from current feedback (no extra query)
+    const currCounts = computeAllBucketCountsFromFeedback(feedback);
+
+    const { new_problems, worsening, improving, resolved } =
+      computeDeltaBucketsFromCounts(prevCounts, currCounts);
+
+    // Idempotent save: delete then insert
+    await supabaseAdmin.from("run_deltas").delete().eq("current_run_id", runId);
+
+    const { error: deltaInsErr } = await supabaseAdmin
+      .from("run_deltas")
+      .insert({
+        project_id: r.project_id,
+        user_id: r.user_id,
+        current_run_id: runId,
+        previous_run_id: prevRun.id,
+        new_problems,
+        worsening,
+        improving,
+        resolved,
+      });
+
+    if (deltaInsErr) {
+      throw new Error(`Failed to write run deltas: ${deltaInsErr.message}`);
+    }
+
+    deltasSaved = true;
+  }
+
+  return {
+    created: rows.length,
+    features: featureRows.length,
+    deltas: deltasSaved,
+    previous_run_id: prevRun?.id ?? null,
+  };
 }
