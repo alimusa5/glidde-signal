@@ -1,0 +1,9 @@
+### Supabase Sign In (password)
+POST https://ogaisgymrmuvhygcrgmw.supabase.co/auth/v1/token?grant_type=password
+apikey: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9nYWlzZ3ltcm11dmh5Z2NyZ213Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzA2NTA3NzMsImV4cCI6MjA4NjIyNjc3M30.8w23HcY8dPi_oiBDaZBsdSJxRAx_RLrNGC7NT5a4KUg
+Content-Type: application/json
+
+{
+  "email": "lumierethestore@gmail.com",
+  "password": "123456"
+}

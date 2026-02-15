@@ -63,6 +63,10 @@ type RunDeltaRow = {
   resolved: DeltaItem[];
 };
 
+type RunMemoRow = {
+  content: string;
+};
+
 function formatDeltaItem(item: DeltaItem, kind: "new" | "resolved" | "change") {
   if (kind === "new") return `New: ${item.title}`;
   if (kind === "resolved") return item.title;
@@ -111,6 +115,76 @@ function DeltaList({
   );
 }
 
+// ✅ Renders memo with bigger headings (NOT bold), clean paragraphs, safe bullets (no innerHTML)
+function MemoRenderer({ memo }: { memo: string }) {
+  const headings = new Set([
+    "Executive Summary",
+    "This Month’s Customer Reality",
+    "What Got Worse",
+    "What Improved",
+    "Top 3 Recommended Actions",
+  ]);
+
+  const lines = memo.split("\n");
+
+  return (
+    <div
+      style={{
+        marginTop: 14,
+        border: "1px solid #eee",
+        borderRadius: 12,
+        padding: 16,
+        background: "#fafafa",
+        fontSize: 14,
+        lineHeight: 1.55,
+        color: "#222",
+      }}
+    >
+      {lines.map((raw, idx) => {
+        const line = raw.trim();
+
+        // Empty line spacing
+        if (!line) {
+          return <div key={idx} style={{ height: 10 }} />;
+        }
+
+        // ✅ Headings: bigger, NOT bold
+        if (headings.has(line)) {
+          return (
+            <div
+              key={idx}
+              style={{
+                fontWeight: 500, // ✅ not bold (400 = normal)
+                fontSize: 16, // ✅ bigger
+                marginTop: 14,
+                marginBottom: 8,
+              }}
+            >
+              {line}
+            </div>
+          );
+        }
+
+        // Bullets (already has "•")
+        if (line.startsWith("•")) {
+          return (
+            <div key={idx} style={{ marginLeft: 12, marginBottom: 6 }}>
+              {line}
+            </div>
+          );
+        }
+
+        // Normal paragraph line
+        return (
+          <div key={idx} style={{ marginBottom: 8 }}>
+            {line}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 export default function RunDetailsPage() {
   const router = useRouter();
   const params = useParams<{ id: string; runId: string }>();
@@ -124,17 +198,69 @@ export default function RunDetailsPage() {
   const [problems, setProblems] = useState<RunProblem[]>([]);
   const [loadingProblems, setLoadingProblems] = useState(false);
 
-  // ✅ Day 6: Feature-level pain map state
   const [features, setFeatures] = useState<RunFeature[]>([]);
   const [loadingFeatures, setLoadingFeatures] = useState(false);
 
-  // ✅ Day 7: Run deltas state
   const [deltaRow, setDeltaRow] = useState<RunDeltaRow | null>(null);
   const [loadingDeltas, setLoadingDeltas] = useState(false);
+
+  const [memo, setMemo] = useState("");
+  const [loadingMemo, setLoadingMemo] = useState(false);
+  const [memoError, setMemoError] = useState("");
+  const [copied, setCopied] = useState(false);
 
   const [errorMsg, setErrorMsg] = useState("");
 
   const formatTime = (iso: string) => new Date(iso).toLocaleString();
+
+  async function handleGenerateMemo() {
+    setMemoError("");
+    setCopied(false);
+
+    if (!run || run.status !== "completed") {
+      setMemoError("Memo can only be generated for a completed run.");
+      return;
+    }
+
+    setLoadingMemo(true);
+    try {
+      const { data: sessionData } = await supabase.auth.getSession();
+      const token = sessionData.session?.access_token;
+
+      if (!token) {
+        setMemoError("You must be logged in to generate a memo.");
+        return;
+      }
+
+      const res = await fetch(`/api/runs/${runId}/generate-memo`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+
+      const json = (await res.json()) as { memo?: string; error?: string };
+
+      if (!res.ok) {
+        setMemoError(json.error || "Failed to generate memo.");
+        return;
+      }
+
+      setMemo(json.memo || "");
+    } catch {
+      setMemoError("Failed to generate memo.");
+    } finally {
+      setLoadingMemo(false);
+    }
+  }
+
+  async function handleCopyMemo() {
+    try {
+      await navigator.clipboard.writeText(memo);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1200);
+    } catch {
+      // no-op
+    }
+  }
 
   useEffect(() => {
     async function load() {
@@ -144,6 +270,11 @@ export default function RunDetailsPage() {
       setFeatures([]);
       setDeltaRow(null);
 
+      // reset memo state on route change
+      setMemo("");
+      setMemoError("");
+      setCopied(false);
+
       // Auth gate
       const { data: userData } = await supabase.auth.getUser();
       if (!userData.user) {
@@ -151,7 +282,7 @@ export default function RunDetailsPage() {
         return;
       }
 
-      // Fetch run (must belong to project + user)
+      // Fetch run
       const { data: r, error: runErr } = await supabase
         .from("runs")
         .select(
@@ -176,7 +307,7 @@ export default function RunDetailsPage() {
 
       setRun(r as RunRecord);
 
-      // If scope=upload, fetch upload info for display
+      // Upload info
       if (r.scope === "upload" && r.upload_id) {
         const { data: u } = await supabase
           .from("uploads")
@@ -189,9 +320,8 @@ export default function RunDetailsPage() {
         setUpload(null);
       }
 
-      // Fetch Problems + Features + Deltas only when completed
       if (r.status === "completed") {
-        // ✅ Top Problems
+        // Problems
         setLoadingProblems(true);
         const { data: p, error: pErr } = await supabase
           .from("run_problems")
@@ -211,7 +341,7 @@ export default function RunDetailsPage() {
         setProblems((p ?? []) as RunProblem[]);
         setLoadingProblems(false);
 
-        // ✅ Day 6: Feature-Level Pain Map
+        // Features
         setLoadingFeatures(true);
         const { data: f, error: fErr } = await supabase
           .from("run_features")
@@ -222,14 +352,13 @@ export default function RunDetailsPage() {
           .order("mention_count", { ascending: false });
 
         if (fErr) {
-          // Don't fail whole page — just show empty features section
           setFeatures([]);
         } else {
           setFeatures((f ?? []) as RunFeature[]);
         }
         setLoadingFeatures(false);
 
-        // ✅ Day 7: What changed since last run
+        // Deltas
         setLoadingDeltas(true);
         const { data: d, error: dErr } = await supabase
           .from("run_deltas")
@@ -238,12 +367,21 @@ export default function RunDetailsPage() {
           .maybeSingle();
 
         if (dErr) {
-          // Don't fail whole page — calm empty state instead
           setDeltaRow(null);
         } else {
           setDeltaRow((d as RunDeltaRow) ?? null);
         }
         setLoadingDeltas(false);
+
+        // Existing memo
+        const { data: m } = await supabase
+          .from("run_memos")
+          .select("content")
+          .eq("run_id", runId)
+          .maybeSingle();
+
+        const memoRow = (m as RunMemoRow | null) ?? null;
+        if (memoRow?.content) setMemo(memoRow.content);
       }
 
       setLoading(false);
@@ -587,6 +725,71 @@ export default function RunDetailsPage() {
             />
           </div>
         )}
+      </section>
+
+      {/* ✅ Day 8: Executive Decision Memo */}
+      <section
+        style={{
+          marginTop: 20,
+          border: "1px solid #e5e5e5",
+          borderRadius: 12,
+          padding: 20,
+        }}
+      >
+        <div style={{ fontWeight: 600, marginBottom: 10 }}>
+          Executive Decision Memo
+        </div>
+
+        <div style={{ color: "#666", fontSize: 13, marginBottom: 14 }}>
+          One-page memo you can paste into Slack. Plain English. No fluff.
+        </div>
+
+        {run.status !== "completed" ? (
+          <div style={{ color: "#666", fontSize: 14 }}>
+            Memo is available after the run is completed.
+          </div>
+        ) : (
+          <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+            <button
+              onClick={handleGenerateMemo}
+              disabled={loadingMemo}
+              style={{
+                padding: "10px 12px",
+                borderRadius: 10,
+                border: "1px solid #ddd",
+                background: loadingMemo ? "#f3f3f3" : "#fff",
+                cursor: loadingMemo ? "not-allowed" : "pointer",
+                fontWeight: 600,
+              }}
+            >
+              {loadingMemo ? "Generating…" : "Generate Executive Memo"}
+            </button>
+
+            {memo && (
+              <button
+                onClick={handleCopyMemo}
+                style={{
+                  padding: "10px 12px",
+                  borderRadius: 10,
+                  border: "1px solid #ddd",
+                  background: "#fff",
+                  cursor: "pointer",
+                  fontWeight: 600,
+                }}
+              >
+                {copied ? "Copied!" : "Copy"}
+              </button>
+            )}
+          </div>
+        )}
+
+        {memoError && (
+          <div style={{ marginTop: 10, color: "crimson", fontSize: 14 }}>
+            {memoError}
+          </div>
+        )}
+
+        {memo && <MemoRenderer memo={memo} />}
       </section>
     </div>
   );
