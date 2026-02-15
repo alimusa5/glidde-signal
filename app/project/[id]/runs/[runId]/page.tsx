@@ -15,6 +15,7 @@ type RunRecord = {
   entry_count: number;
   status: "queued" | "processing" | "completed" | "failed";
   created_at: string;
+  label: string | null; // ✅ Day 9 Step 5: run naming
 };
 
 type UploadInfo = {
@@ -63,8 +64,14 @@ type RunDeltaRow = {
   resolved: DeltaItem[];
 };
 
+// ✅ Day 9 Step 2: link to previous run
+type RunDeltaDbRow = RunDeltaRow & {
+  previous_run_id: string | null;
+};
+
 type RunMemoRow = {
   content: string;
+  created_at: string; // ✅ Day 9 Step 4: memo saved timestamp
 };
 
 function formatDeltaItem(item: DeltaItem, kind: "new" | "resolved" | "change") {
@@ -115,6 +122,31 @@ function DeltaList({
   );
 }
 
+// ✅ Day 9 Step 4: clearer processing state + refresh hint
+function ProcessingNotice({ onRefresh }: { onRefresh: () => void }) {
+  return (
+    <div style={{ color: "#666", fontSize: 14 }}>
+      <div style={{ marginBottom: 10 }}>
+        This run is still processing. Entries are being indexed and insights
+        will appear automatically when ready.
+      </div>
+      <button
+        onClick={onRefresh}
+        style={{
+          padding: "8px 12px",
+          borderRadius: 10,
+          border: "1px solid #ddd",
+          background: "#fff",
+          cursor: "pointer",
+          fontWeight: 600,
+        }}
+      >
+        Refresh
+      </button>
+    </div>
+  );
+}
+
 // ✅ Renders memo with bigger headings (NOT bold), clean paragraphs, safe bullets (no innerHTML)
 function MemoRenderer({ memo }: { memo: string }) {
   const headings = new Set([
@@ -154,8 +186,8 @@ function MemoRenderer({ memo }: { memo: string }) {
             <div
               key={idx}
               style={{
-                fontWeight: 500, // ✅ not bold (400 = normal)
-                fontSize: 16, // ✅ bigger
+                fontWeight: 500, // not bold
+                fontSize: 16,
                 marginTop: 14,
                 marginBottom: 8,
               }}
@@ -201,15 +233,23 @@ export default function RunDetailsPage() {
   const [features, setFeatures] = useState<RunFeature[]>([]);
   const [loadingFeatures, setLoadingFeatures] = useState(false);
 
-  const [deltaRow, setDeltaRow] = useState<RunDeltaRow | null>(null);
+  const [deltaRow, setDeltaRow] = useState<RunDeltaDbRow | null>(null);
   const [loadingDeltas, setLoadingDeltas] = useState(false);
 
   const [memo, setMemo] = useState("");
+  const [memoSavedAt, setMemoSavedAt] = useState<string | null>(null);
   const [loadingMemo, setLoadingMemo] = useState(false);
   const [memoError, setMemoError] = useState("");
   const [copied, setCopied] = useState(false);
 
   const [errorMsg, setErrorMsg] = useState("");
+
+  // ✅ Day 9 Step 4: toast feedback (copy + label saved)
+  const [toast, setToast] = useState<string>("");
+
+  // ✅ Day 9 Step 5: run label edit
+  const [labelDraft, setLabelDraft] = useState("");
+  const [savingLabel, setSavingLabel] = useState(false);
 
   const formatTime = (iso: string) => new Date(iso).toLocaleString();
 
@@ -223,6 +263,7 @@ export default function RunDetailsPage() {
     }
 
     setLoadingMemo(true);
+
     try {
       const { data: sessionData } = await supabase.auth.getSession();
       const token = sessionData.session?.access_token;
@@ -232,12 +273,19 @@ export default function RunDetailsPage() {
         return;
       }
 
-      const res = await fetch(`/api/runs/${runId}/generate-memo`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      // ✅ If memo exists → regenerate
+      // ✅ If no memo → generate normally
+      const force = !!memo;
 
-      const json = (await res.json()) as { memo?: string; error?: string };
+      const res = await fetch(
+        `/api/runs/${runId}/generate-memo${force ? "?force=true" : ""}`,
+        {
+          method: "POST",
+          headers: { Authorization: `Bearer ${token}` },
+        },
+      );
+
+      const json = await res.json();
 
       if (!res.ok) {
         setMemoError(json.error || "Failed to generate memo.");
@@ -245,6 +293,10 @@ export default function RunDetailsPage() {
       }
 
       setMemo(json.memo || "");
+
+      // Optional: if your API returns memoSavedAt, you can set it here.
+      // Otherwise it will update on refresh / next load.
+      if (json.memoSavedAt) setMemoSavedAt(json.memoSavedAt);
     } catch {
       setMemoError("Failed to generate memo.");
     } finally {
@@ -256,9 +308,53 @@ export default function RunDetailsPage() {
     try {
       await navigator.clipboard.writeText(memo);
       setCopied(true);
+      setToast("Memo copied to clipboard.");
       setTimeout(() => setCopied(false), 1200);
+      setTimeout(() => setToast(""), 1600);
     } catch {
-      // no-op
+      setToast("Copy failed.");
+      setTimeout(() => setToast(""), 1600);
+    }
+  }
+
+  async function handleSaveLabel() {
+    setSavingLabel(true);
+    try {
+      const { data: sessionData } = await supabase.auth.getSession();
+      const token = sessionData.session?.access_token;
+
+      if (!token) {
+        setToast("You must be logged in.");
+        setTimeout(() => setToast(""), 1600);
+        return;
+      }
+
+      const res = await fetch(`/api/runs/${runId}`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          label: labelDraft.trim().slice(0, 60) || null,
+        }),
+      });
+
+      if (!res.ok) {
+        setToast("Failed to save label.");
+        setTimeout(() => setToast(""), 1600);
+        return;
+      }
+
+      setToast("Label saved.");
+      setTimeout(() => setToast(""), 1400);
+
+      // Keep UI consistent even if backend trims/normalizes
+      setRun((prev) =>
+        prev ? { ...prev, label: labelDraft.trim() || null } : prev,
+      );
+    } finally {
+      setSavingLabel(false);
     }
   }
 
@@ -272,6 +368,7 @@ export default function RunDetailsPage() {
 
       // reset memo state on route change
       setMemo("");
+      setMemoSavedAt(null);
       setMemoError("");
       setCopied(false);
 
@@ -286,7 +383,7 @@ export default function RunDetailsPage() {
       const { data: r, error: runErr } = await supabase
         .from("runs")
         .select(
-          "id, project_id, user_id, scope, upload_id, source_filter, entry_count, status, created_at",
+          "id, project_id, user_id, scope, upload_id, source_filter, entry_count, status, created_at, label",
         )
         .eq("id", runId)
         .eq("project_id", projectId)
@@ -305,14 +402,16 @@ export default function RunDetailsPage() {
         return;
       }
 
-      setRun(r as RunRecord);
+      const runRecord = r as RunRecord;
+      setRun(runRecord);
+      setLabelDraft(runRecord.label ?? "");
 
       // Upload info
-      if (r.scope === "upload" && r.upload_id) {
+      if (runRecord.scope === "upload" && runRecord.upload_id) {
         const { data: u } = await supabase
           .from("uploads")
           .select("id, source, created_at")
-          .eq("id", r.upload_id)
+          .eq("id", runRecord.upload_id)
           .maybeSingle();
 
         if (u) setUpload(u as UploadInfo);
@@ -320,7 +419,7 @@ export default function RunDetailsPage() {
         setUpload(null);
       }
 
-      if (r.status === "completed") {
+      if (runRecord.status === "completed") {
         // Problems
         setLoadingProblems(true);
         const { data: p, error: pErr } = await supabase
@@ -358,30 +457,35 @@ export default function RunDetailsPage() {
         }
         setLoadingFeatures(false);
 
-        // Deltas
+        // Deltas (✅ include previous_run_id for link)
         setLoadingDeltas(true);
         const { data: d, error: dErr } = await supabase
           .from("run_deltas")
-          .select("new_problems, worsening, improving, resolved")
+          .select(
+            "new_problems, worsening, improving, resolved, previous_run_id",
+          )
           .eq("current_run_id", runId)
           .maybeSingle();
 
         if (dErr) {
           setDeltaRow(null);
         } else {
-          setDeltaRow((d as RunDeltaRow) ?? null);
+          setDeltaRow((d as RunDeltaDbRow) ?? null);
         }
         setLoadingDeltas(false);
 
-        // Existing memo
+        // Existing memo (✅ include created_at for “Memo saved at”)
         const { data: m } = await supabase
           .from("run_memos")
-          .select("content")
+          .select("content, created_at")
           .eq("run_id", runId)
           .maybeSingle();
 
         const memoRow = (m as RunMemoRow | null) ?? null;
-        if (memoRow?.content) setMemo(memoRow.content);
+        if (memoRow?.content) {
+          setMemo(memoRow.content);
+          setMemoSavedAt(memoRow.created_at);
+        }
       }
 
       setLoading(false);
@@ -423,6 +527,61 @@ export default function RunDetailsPage() {
       <h1 style={{ fontSize: 24, fontWeight: 600, marginTop: 16 }}>
         Run Details
       </h1>
+
+      {/* ✅ Day 9 Step 4: toast */}
+      {toast && (
+        <div
+          style={{
+            marginTop: 12,
+            padding: "10px 12px",
+            borderRadius: 10,
+            border: "1px solid #eee",
+            background: "#fafafa",
+            fontSize: 14,
+            color: "#111",
+          }}
+        >
+          {toast}
+        </div>
+      )}
+
+      {/* ✅ Day 9 Step 5: run naming */}
+      <div
+        style={{
+          marginTop: 12,
+          display: "flex",
+          gap: 10,
+          alignItems: "center",
+        }}
+      >
+        <input
+          value={labelDraft}
+          onChange={(e) => setLabelDraft(e.target.value)}
+          placeholder="Add a label (e.g., January Feedback)"
+          style={{
+            width: "100%",
+            padding: "10px 12px",
+            borderRadius: 10,
+            border: "1px solid #ddd",
+            fontSize: 14,
+          }}
+        />
+        <button
+          disabled={savingLabel}
+          onClick={handleSaveLabel}
+          style={{
+            padding: "10px 12px",
+            borderRadius: 10,
+            border: "1px solid #ddd",
+            background: "#fff",
+            cursor: savingLabel ? "not-allowed" : "pointer",
+            fontWeight: 600,
+            whiteSpace: "nowrap",
+          }}
+        >
+          {savingLabel ? "Saving…" : "Save"}
+        </button>
+      </div>
 
       {/* Snapshot Metadata */}
       <section
@@ -481,9 +640,7 @@ export default function RunDetailsPage() {
         <div style={{ fontWeight: 600, marginBottom: 12 }}>Top Problems</div>
 
         {run.status === "queued" || run.status === "processing" ? (
-          <div style={{ color: "#666" }}>
-            This run is processing. Refresh in a moment.
-          </div>
+          <ProcessingNotice onRefresh={() => router.refresh()} />
         ) : run.status === "failed" ? (
           <div style={{ color: "crimson" }}>
             This run failed. Try generating insights again.
@@ -566,7 +723,7 @@ export default function RunDetailsPage() {
         )}
       </section>
 
-      {/* ✅ Day 6: Feature-Level Pain Map */}
+      {/* Feature-Level Pain Map */}
       <section
         style={{
           marginTop: 20,
@@ -584,9 +741,7 @@ export default function RunDetailsPage() {
         </div>
 
         {run.status === "queued" || run.status === "processing" ? (
-          <div style={{ color: "#666" }}>
-            This run is processing. Refresh in a moment.
-          </div>
+          <ProcessingNotice onRefresh={() => router.refresh()} />
         ) : run.status === "failed" ? (
           <div style={{ color: "crimson" }}>
             This run failed. Try generating insights again.
@@ -669,7 +824,7 @@ export default function RunDetailsPage() {
         )}
       </section>
 
-      {/* ✅ Day 7: What changed since last run */}
+      {/* What changed since last run */}
       <section
         style={{
           marginTop: 20,
@@ -679,14 +834,25 @@ export default function RunDetailsPage() {
           background: "#fafafa",
         }}
       >
-        <div style={{ fontWeight: 600, marginBottom: 12 }}>
+        <div style={{ fontWeight: 600, marginBottom: 8 }}>
           What changed since last run
         </div>
 
-        {run.status === "queued" || run.status === "processing" ? (
-          <div style={{ color: "#666" }}>
-            This run is processing. Refresh in a moment.
+        {/* ✅ Day 9 Step 2: previous run link */}
+        {deltaRow?.previous_run_id && (
+          <div style={{ marginBottom: 12, fontSize: 13, color: "#666" }}>
+            Compared to:{" "}
+            <Link
+              href={`/project/${projectId}/runs/${deltaRow.previous_run_id}`}
+              style={{ textDecoration: "none" }}
+            >
+              previous run →
+            </Link>
           </div>
+        )}
+
+        {run.status === "queued" || run.status === "processing" ? (
+          <ProcessingNotice onRefresh={() => router.refresh()} />
         ) : run.status === "failed" ? (
           <div style={{ color: "crimson" }}>
             This run failed. Try generating insights again.
@@ -727,7 +893,7 @@ export default function RunDetailsPage() {
         )}
       </section>
 
-      {/* ✅ Day 8: Executive Decision Memo */}
+      {/* Executive Decision Memo */}
       <section
         style={{
           marginTop: 20,
@@ -740,9 +906,16 @@ export default function RunDetailsPage() {
           Executive Decision Memo
         </div>
 
-        <div style={{ color: "#666", fontSize: 13, marginBottom: 14 }}>
+        <div style={{ color: "#666", fontSize: 13, marginBottom: 10 }}>
           One-page memo you can paste into Slack. Plain English. No fluff.
         </div>
+
+        {/* ✅ Day 9 Step 4: memo saved timestamp */}
+        {memoSavedAt && (
+          <div style={{ color: "#666", fontSize: 13, marginBottom: 14 }}>
+            Memo saved at: {formatTime(memoSavedAt)}
+          </div>
+        )}
 
         {run.status !== "completed" ? (
           <div style={{ color: "#666", fontSize: 14 }}>
@@ -762,7 +935,11 @@ export default function RunDetailsPage() {
                 fontWeight: 600,
               }}
             >
-              {loadingMemo ? "Generating…" : "Generate Executive Memo"}
+              {loadingMemo
+                ? "Generating…"
+                : memo
+                  ? "Regenerate Memo"
+                  : "Generate Memo"}
             </button>
 
             {memo && (

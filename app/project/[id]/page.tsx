@@ -23,6 +23,13 @@ type RunHistoryItem = {
   created_at: string;
 };
 
+type RunMemoMeta = {
+  run_id: string;
+  created_at: string;
+};
+
+type MemoMetaByRunId = Record<string, { created_at: string }>;
+
 export default function ProjectPage() {
   const router = useRouter();
   const params = useParams<{ id: string }>();
@@ -50,6 +57,9 @@ export default function ProjectPage() {
   // Step 3 additions: Run History state
   const [runs, setRuns] = useState<RunHistoryItem[]>([]);
   const [loadingRuns, setLoadingRuns] = useState(false);
+
+  // ✅ Step 1 (Day 9): memo existence + memo timestamp map by run_id
+  const [memoMeta, setMemoMeta] = useState<MemoMetaByRunId>({});
 
   async function getAccessToken(): Promise<string> {
     const { data, error } = await supabase.auth.getSession();
@@ -92,14 +102,14 @@ export default function ProjectPage() {
     }
   }
 
-  // Step 3: Load run history list
+  // ✅ Step 1 (Day 9): Load run history list + memo metadata (fast, no joins)
   async function loadRunHistory(projectId: string) {
     setLoadingRuns(true);
     try {
       const { data: userData } = await supabase.auth.getUser();
       if (!userData.user) return;
 
-      const { data } = await supabase
+      const { data: runRows } = await supabase
         .from("runs")
         .select("id, scope, source_filter, entry_count, status, created_at")
         .eq("project_id", projectId)
@@ -107,7 +117,29 @@ export default function ProjectPage() {
         .order("created_at", { ascending: false })
         .limit(10);
 
-      setRuns((data ?? []) as RunHistoryItem[]);
+      const runsList = (runRows ?? []) as RunHistoryItem[];
+      setRuns(runsList);
+
+      // Fetch memo metadata for these runs (only run_id + created_at)
+      const runIds = runsList.map((r) => r.id);
+      if (runIds.length === 0) {
+        setMemoMeta({});
+        return;
+      }
+
+      const { data: memoRows } = await supabase
+        .from("run_memos")
+        .select("run_id, created_at")
+        .eq("project_id", projectId)
+        .eq("user_id", userData.user.id)
+        .in("run_id", runIds);
+
+      const map: MemoMetaByRunId = {};
+      ((memoRows ?? []) as RunMemoMeta[]).forEach((m) => {
+        map[m.run_id] = { created_at: m.created_at };
+      });
+
+      setMemoMeta(map);
     } finally {
       setLoadingRuns(false);
     }
@@ -270,7 +302,7 @@ export default function ProjectPage() {
 
                   try {
                     const { runId } = await createRun(id);
-                    // Step 3 polish: refresh history before leaving (useful when user comes back)
+                    // refresh history before leaving (useful when user comes back)
                     await loadRunHistory(id);
                     router.push(`/project/${id}/runs/${runId}`);
                   } catch (e: unknown) {
@@ -324,29 +356,44 @@ export default function ProjectPage() {
           <div style={{ color: "#666" }}>No runs yet.</div>
         ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-            {runs.map((r) => (
-              <Link
-                key={r.id}
-                href={`/project/${id}/runs/${r.id}`}
-                style={{
-                  textDecoration: "none",
-                  border: "1px solid #eee",
-                  borderRadius: 10,
-                  padding: 12,
-                  color: "#111",
-                }}
-              >
-                <div style={{ fontWeight: 600 }}>
-                  {new Date(r.created_at).toLocaleString()}
-                </div>
-                <div style={{ color: "#444", marginTop: 4, fontSize: 14 }}>
-                  Scope:{" "}
-                  {r.scope === "project" ? "Project-wide" : "Single upload"} •
-                  Source: {r.source_filter} • Entries: {r.entry_count} • Status:{" "}
-                  {r.status}
-                </div>
-              </Link>
-            ))}
+            {runs.map((r) => {
+              const memoSavedAt = memoMeta[r.id]?.created_at;
+              const hasMemo = !!memoSavedAt;
+
+              return (
+                <Link
+                  key={r.id}
+                  href={`/project/${id}/runs/${r.id}`}
+                  style={{
+                    textDecoration: "none",
+                    border: "1px solid #eee",
+                    borderRadius: 10,
+                    padding: 12,
+                    color: "#111",
+                  }}
+                >
+                  <div style={{ fontWeight: 600 }}>
+                    {new Date(r.created_at).toLocaleString()}
+                  </div>
+
+                  <div style={{ color: "#444", marginTop: 4, fontSize: 14 }}>
+                    Scope:{" "}
+                    {r.scope === "project" ? "Project-wide" : "Single upload"} •
+                    Source: {r.source_filter} • Entries: {r.entry_count} •
+                    Status: {r.status} •{" "}
+                    <span style={{ fontWeight: 600 }}>
+                      {hasMemo ? "✅ Memo" : "— No memo"}
+                    </span>
+                  </div>
+
+                  {hasMemo && (
+                    <div style={{ color: "#666", marginTop: 4, fontSize: 13 }}>
+                      Memo saved at: {new Date(memoSavedAt).toLocaleString()}
+                    </div>
+                  )}
+                </Link>
+              );
+            })}
           </div>
         )}
       </section>

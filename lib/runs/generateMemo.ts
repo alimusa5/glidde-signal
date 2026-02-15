@@ -1,4 +1,4 @@
-// libs/runs/generateMemo.ts
+// lib/runs/generateMemo.ts
 import OpenAI from "openai";
 import { createClient } from "@supabase/supabase-js";
 
