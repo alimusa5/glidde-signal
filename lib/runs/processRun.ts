@@ -91,7 +91,6 @@ const RULES: Array<{ key: BucketKey; match: RegExp }> = [
   },
 
   // Mobile-specific: device/platform keywords + common mobile terms
-  // ✅ Fix: include notifications plural + push notifications
   {
     key: "mobile",
     match:
@@ -99,7 +98,6 @@ const RULES: Array<{ key: BucketKey; match: RegExp }> = [
   },
 
   // Performance: slow, lag, timeout, loading, freezes, hangs
-  // ✅ Fix: include "freezes"
   {
     key: "performance",
     match:
@@ -114,7 +112,6 @@ const RULES: Array<{ key: BucketKey; match: RegExp }> = [
   },
 
   // UI/UX: confusion, navigation, cannot find, hard to use, steps, onboarding friction
-  // ✅ Fix: smart quotes handled in normalizeText(), so can't vs can’t will match
   {
     key: "ui_ux",
     match:
@@ -259,7 +256,6 @@ const FEATURE_RULES: Array<{ feature: string; match: RegExp }> = [
     match:
       /\b(mobile|phone|tablet|android|ios|iphone|ipad|apk|play store|app store|touch id|face id|biometric)\b/,
   },
-  // ✅ Fix: include "freezes"
   {
     feature: "Performance",
     match:
@@ -454,6 +450,11 @@ export async function processRun(runId: string) {
     await supabaseAdmin.from("run_problems").delete().eq("run_id", runId);
     await supabaseAdmin.from("run_features").delete().eq("run_id", runId);
     await supabaseAdmin.from("run_deltas").delete().eq("current_run_id", runId);
+    // ✅ Clear mappings too (avoid stale evidence)
+    await supabaseAdmin
+      .from("run_problem_entries")
+      .delete()
+      .eq("run_id", runId);
     return { created: 0, features: 0, deltas: false };
   }
 
@@ -506,12 +507,64 @@ export async function processRun(runId: string) {
   // 7) Idempotent: clear existing problems for this run, then insert fresh
   await supabaseAdmin.from("run_problems").delete().eq("run_id", runId);
 
-  const { error: insertErr } = await supabaseAdmin
+  // Insert and RETURN inserted rows (we need their IDs)
+  const { data: insertedProblems, error: insertErr } = await supabaseAdmin
     .from("run_problems")
-    .insert(rows);
+    .insert(rows)
+    .select("id, title");
 
   if (insertErr) {
     throw new Error(`Failed to write run problems: ${insertErr.message}`);
+  }
+
+  if (!insertedProblems || insertedProblems.length === 0) {
+    throw new Error("Inserted problems missing.");
+  }
+
+  // ----------------------------------------------------
+  // ✅ Persist feedback_entry → problem mapping
+  // ----------------------------------------------------
+
+  // ✅ Clear previous mappings for THIS RUN (safe + complete)
+  await supabaseAdmin.from("run_problem_entries").delete().eq("run_id", runId);
+
+  // Map title → problem_id (DB IDs)
+  const titleToProblemId = new Map<string, string>();
+  for (const p of insertedProblems) {
+    titleToProblemId.set(p.title, p.id);
+  }
+
+  // Build mapping rows (include run_id)
+  const mappingRows: Array<{
+    run_id: string;
+    problem_id: string;
+    feedback_entry_id: string;
+  }> = [];
+
+  for (const b of top) {
+    const problemId = titleToProblemId.get(b.title);
+    if (!problemId) continue;
+
+    for (const entryId of b.entryIds) {
+      mappingRows.push({
+        run_id: runId,
+        problem_id: problemId,
+        feedback_entry_id: entryId,
+      });
+    }
+  }
+
+  // Insert mappings
+  if (mappingRows.length > 0) {
+    const { error: mapErr } = await supabaseAdmin
+      .from("run_problem_entries")
+      .insert(mappingRows);
+
+    if (mapErr) {
+      throw new Error(
+        `Failed to write problem-entry mappings: ${mapErr.message}`,
+      );
+    }
   }
 
   // ---------------- Day 6: write run_features (Feature-Level Pain Map) ----------------

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { supabase } from "@/lib/supabase";
@@ -72,6 +72,15 @@ type RunDeltaDbRow = RunDeltaRow & {
 type RunMemoRow = {
   content: string;
   created_at: string; // ✅ Day 9 Step 4: memo saved timestamp
+};
+
+type ProblemActionRow = {
+  problem_id: string;
+  suggested_action: string | null;
+  first_check: string | null;
+  owner_guess: string | null;
+  expected_impact: string | null;
+  created_at: string | null;
 };
 
 function formatDeltaItem(item: DeltaItem, kind: "new" | "resolved" | "change") {
@@ -251,6 +260,13 @@ export default function RunDetailsPage() {
   const [labelDraft, setLabelDraft] = useState("");
   const [savingLabel, setSavingLabel] = useState(false);
 
+  const [actionsByProblemId, setActionsByProblemId] = useState<
+    Record<string, ProblemActionRow>
+  >({});
+  const [loadingActions, setLoadingActions] = useState(false);
+  const [actionsError, setActionsError] = useState("");
+  const [copiedProblemId, setCopiedProblemId] = useState<string | null>(null);
+
   const formatTime = (iso: string) => new Date(iso).toLocaleString();
 
   async function handleGenerateMemo() {
@@ -304,6 +320,49 @@ export default function RunDetailsPage() {
     }
   }
 
+  const loadProblemActions = useCallback(
+    async (force = false) => {
+      setActionsError("");
+      setLoadingActions(true);
+
+      try {
+        const { data: sessionData } = await supabase.auth.getSession();
+        const token = sessionData.session?.access_token;
+
+        if (!token) {
+          setActionsError("You must be logged in to load actions.");
+          return;
+        }
+
+        const res = await fetch(
+          `/api/runs/${runId}/actions${force ? "?force=true" : ""}`,
+          {
+            method: "GET",
+            headers: { Authorization: `Bearer ${token}` },
+          },
+        );
+
+        const json = await res.json();
+
+        if (!res.ok) {
+          setActionsError(json.error || "Failed to load actions.");
+          return;
+        }
+
+        const rows = (json.actions ?? []) as ProblemActionRow[];
+        const map: Record<string, ProblemActionRow> = {};
+        for (const a of rows) map[a.problem_id] = a;
+
+        setActionsByProblemId(map);
+      } catch {
+        setActionsError("Failed to load actions.");
+      } finally {
+        setLoadingActions(false);
+      }
+    },
+    [runId],
+  );
+
   async function handleCopyMemo() {
     try {
       await navigator.clipboard.writeText(memo);
@@ -355,6 +414,42 @@ export default function RunDetailsPage() {
       );
     } finally {
       setSavingLabel(false);
+    }
+  }
+  function buildJiraTaskText(problem: RunProblem, action: ProblemActionRow) {
+    return [
+      `Title: ${problem.title}`,
+      "",
+      "Suggested Action:",
+      action.suggested_action || "—",
+      "",
+      "First Check:",
+      action.first_check || "—",
+      "",
+      "Owner:",
+      action.owner_guess || "—",
+      "",
+      "Expected Impact:",
+      action.expected_impact || "—",
+    ].join("\n");
+  }
+
+  async function handleCopyJiraTask(problem: RunProblem) {
+    const action = actionsByProblemId[problem.id];
+    if (!action) return;
+
+    try {
+      const text = buildJiraTaskText(problem, action);
+      await navigator.clipboard.writeText(text);
+
+      setCopiedProblemId(problem.id);
+
+      setTimeout(() => {
+        setCopiedProblemId(null);
+      }, 1200);
+    } catch {
+      setToast("Copy failed.");
+      setTimeout(() => setToast(""), 1600);
     }
   }
 
@@ -439,6 +534,7 @@ export default function RunDetailsPage() {
 
         setProblems((p ?? []) as RunProblem[]);
         setLoadingProblems(false);
+        await loadProblemActions(false);
 
         // Features
         setLoadingFeatures(true);
@@ -492,7 +588,7 @@ export default function RunDetailsPage() {
     }
 
     load();
-  }, [projectId, runId, router]);
+  }, [projectId, runId, router, loadProblemActions]);
 
   if (loading) return <div style={{ padding: 32 }}>Loading run...</div>;
 
@@ -637,7 +733,40 @@ export default function RunDetailsPage() {
           padding: 20,
         }}
       >
-        <div style={{ fontWeight: 600, marginBottom: 12 }}>Top Problems</div>
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            marginBottom: 12,
+          }}
+        >
+          <div style={{ fontWeight: 600 }}>Top Problems</div>
+
+          {run.status === "completed" && problems.length > 0 && (
+            <button
+              onClick={() => loadProblemActions(true)}
+              disabled={loadingActions}
+              style={{
+                padding: "8px 10px",
+                borderRadius: 10,
+                border: "1px solid #ddd",
+                background: "#fff",
+                cursor: loadingActions ? "not-allowed" : "pointer",
+                fontWeight: 600,
+                fontSize: 13,
+              }}
+            >
+              {loadingActions ? "Regenerating…" : "Regenerate actions"}
+            </button>
+          )}
+        </div>
+
+        {actionsError && (
+          <div style={{ marginBottom: 10, color: "crimson", fontSize: 14 }}>
+            {actionsError}
+          </div>
+        )}
 
         {run.status === "queued" || run.status === "processing" ? (
           <ProcessingNotice onRefresh={() => router.refresh()} />
@@ -714,6 +843,141 @@ export default function RunDetailsPage() {
                   ) : (
                     <div style={{ marginTop: 6, color: "#666", fontSize: 14 }}>
                       No quotes available.
+                    </div>
+                  )}
+                  {actionsByProblemId[p.id] && (
+                    <div
+                      style={{
+                        marginTop: 12,
+                        border: "1px solid #eee",
+                        borderRadius: 12,
+                        padding: 12,
+                        background: "#fff",
+                        fontSize: 14,
+                        lineHeight: 1.5,
+                      }}
+                    >
+                      <div
+                        style={{
+                          display: "flex",
+                          justifyContent: "space-between",
+                          gap: 10,
+                        }}
+                      >
+                        <div
+                          style={{
+                            color: "#666",
+                            fontSize: 12,
+                            marginBottom: 8,
+                          }}
+                        >
+                          Decision Assistant
+                        </div>
+                        <button
+                          onClick={() => handleCopyJiraTask(p)}
+                          style={{
+                            padding: "6px 10px",
+                            borderRadius: 10,
+                            border: "1px solid #ddd",
+                            background: "#fff",
+                            cursor: "pointer",
+                            fontWeight: 600,
+                            fontSize: 12,
+                            whiteSpace: "nowrap",
+                          }}
+                        >
+                          {copiedProblemId === p.id
+                            ? "Copied!"
+                            : "Copy as Jira task"}
+                        </button>
+                      </div>
+
+                      <div style={{ marginBottom: 12 }}>
+                        <div
+                          style={{
+                            color: "#666",
+                            fontSize: 12,
+                            marginBottom: 4,
+                          }}
+                        >
+                          Suggested Action
+                        </div>
+                        <div
+                          style={{
+                            whiteSpace: "pre-wrap",
+                            overflowWrap: "anywhere",
+                            wordBreak: "break-word",
+                            lineHeight: 1.6,
+                          }}
+                        >
+                          {actionsByProblemId[p.id].suggested_action || "—"}
+                        </div>
+                      </div>
+
+                      <div style={{ marginBottom: 12 }}>
+                        <div
+                          style={{
+                            color: "#666",
+                            fontSize: 12,
+                            marginBottom: 4,
+                          }}
+                        >
+                          First Check
+                        </div>
+                        <div
+                          style={{
+                            whiteSpace: "pre-wrap",
+                            overflowWrap: "anywhere",
+                            wordBreak: "break-word",
+                            lineHeight: 1.6,
+                          }}
+                        >
+                          {actionsByProblemId[p.id].first_check || "—"}
+                        </div>
+                      </div>
+
+                      <div style={{ marginBottom: 12 }}>
+                        <div
+                          style={{
+                            color: "#666",
+                            fontSize: 12,
+                            marginBottom: 4,
+                          }}
+                        >
+                          Suggested Owner
+                        </div>
+                        <div
+                          style={{
+                            whiteSpace: "pre-wrap",
+                            overflowWrap: "anywhere",
+                            wordBreak: "break-word",
+                          }}
+                        >
+                          {actionsByProblemId[p.id].owner_guess || "—"}
+                        </div>
+                      </div>
+
+                      <div>
+                        <div
+                          style={{
+                            color: "#666",
+                            fontSize: 12,
+                            marginBottom: 4,
+                          }}
+                        >
+                          Expected Impact
+                        </div>
+                        <div
+                          style={{
+                            whiteSpace: "pre-wrap",
+                            overflowWrap: "anywhere",
+                            wordBreak: "break-word",
+                            lineHeight: 1.6,
+                          }}
+                        >
+                          {actionsByProblemId[p.id].expected_impact || "—"}
+                        </div>
+                      </div>
                     </div>
                   )}
                 </div>
