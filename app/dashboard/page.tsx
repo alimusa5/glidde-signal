@@ -52,29 +52,54 @@ export default function DashboardPage() {
     loadProjects();
   }, [userId]);
 
-  // 3) Create a new project, then redirect to /project/[id]
   async function createProject(e: React.FormEvent) {
     e.preventDefault();
-    if (!userId) return;
 
     setCreating(true);
     setError(null);
 
-    const { data, error } = await supabase
-      .from("projects")
-      .insert({ name: name.trim(), user_id: userId })
-      .select("id")
-      .single();
+    try {
+      const { data: sessionData, error: sessionErr } =
+        await supabase.auth.getSession();
+      if (sessionErr) throw sessionErr;
 
-    setCreating(false);
+      const token = sessionData.session?.access_token;
+      if (!token) throw new Error("You are not logged in.");
 
-    if (error) {
-      setError(error.message);
-      return;
+      const res = await fetch("/api/projects/create", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ name: name.trim() }),
+      });
+
+      const json: unknown = await res.json();
+
+      if (!res.ok) {
+        const msg =
+          typeof json === "object" && json !== null && "error" in json
+            ? String((json as Record<string, unknown>).error)
+            : "Failed to create project";
+        throw new Error(msg);
+      }
+
+      const projectId =
+        typeof json === "object" && json !== null && "projectId" in json
+          ? String((json as Record<string, unknown>).projectId)
+          : null;
+
+      if (!projectId) throw new Error("Missing projectId");
+
+      setName("");
+      router.push(`/project/${projectId}`);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : "Something went wrong";
+      setError(msg);
+    } finally {
+      setCreating(false);
     }
-
-    setName("");
-    router.push(`/project/${data.id}`);
   }
 
   if (checking) return <div style={{ padding: 24 }}>Checking session...</div>;

@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { processRun } from "@/lib/runs/processRun";
+import { getActiveSubscriptionForUser } from "@/lib/billing/getSubscription";
 
 const supabaseAdmin = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -20,6 +21,22 @@ function getBearerToken(req: Request) {
   return match?.[1] ?? null;
 }
 
+function startOfCurrentMonthISO(): string {
+  const now = new Date();
+  const start = new Date(
+    Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1, 0, 0, 0),
+  );
+  return start.toISOString();
+}
+
+function startOfNextMonthISO(): string {
+  const now = new Date();
+  const next = new Date(
+    Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1, 0, 0, 0),
+  );
+  return next.toISOString();
+}
+
 export async function POST(req: Request) {
   const token = getBearerToken(req);
   if (!token) {
@@ -28,10 +45,53 @@ export async function POST(req: Request) {
 
   const { data: userData, error: userErr } =
     await supabaseAdmin.auth.getUser(token);
+
   if (userErr || !userData.user) {
     return NextResponse.json({ error: "Not authorized." }, { status: 401 });
   }
+
   const userId = userData.user.id;
+
+  // ✅ Billing gate (Starter: 3 runs per billing period, Pro: unlimited)
+  const sub = await getActiveSubscriptionForUser(userId);
+
+  if (!sub || (sub.status !== "active" && sub.status !== "trialing")) {
+    return NextResponse.json(
+      { error: "No active subscription. Please subscribe to run insights." },
+      { status: 402 },
+    );
+  }
+
+  // Determine the billing period to count runs within
+  // If webhook didn’t populate period fields, fall back to current calendar month
+  const periodStart = sub.current_period_start ?? startOfCurrentMonthISO();
+  const periodEnd = sub.current_period_end ?? startOfNextMonthISO();
+
+  if (sub.plan === "starter") {
+    const { count: runCount, error: runCountErr } = await supabaseAdmin
+      .from("runs")
+      .select("id", { count: "exact", head: true })
+      .eq("user_id", userId)
+      .gte("created_at", periodStart)
+      .lt("created_at", periodEnd);
+
+    if (runCountErr) {
+      return NextResponse.json(
+        { error: "Failed to validate run limit." },
+        { status: 500 },
+      );
+    }
+
+    if ((runCount ?? 0) >= 3) {
+      return NextResponse.json(
+        {
+          error:
+            "Starter plan includes up to 3 insight runs per billing period. Upgrade to Pro for unlimited runs.",
+        },
+        { status: 403 },
+      );
+    }
+  }
 
   let body: Body;
   try {
@@ -70,6 +130,7 @@ export async function POST(req: Request) {
   if (projErr || !proj) {
     return NextResponse.json({ error: "Project not found." }, { status: 404 });
   }
+
   if (proj.user_id !== userId) {
     return NextResponse.json(
       { error: "Not authorized for this project." },
@@ -118,6 +179,7 @@ export async function POST(req: Request) {
   }
 
   const { count, error: countErr } = await q;
+
   if (countErr) {
     return NextResponse.json(
       { error: "Failed to count entries." },
@@ -164,7 +226,7 @@ export async function POST(req: Request) {
     );
   }
 
-  // 6) Day 5: Actually process the run and write Top 5 problems to run_problems
+  // 6) Actually process the run and write Top 5 problems to run_problems
   try {
     await processRun(run.id);
   } catch (e: unknown) {

@@ -402,6 +402,37 @@ function computeDeltaBucketsFromCounts(
   };
 }
 
+/**
+ * ✅ Helper: delete run_problem_entries for a run WITHOUT needing run_id on that table.
+ * We delete mappings where problem_id is one of the run_problems for this run.
+ */
+async function clearProblemEntryMappingsForRun(runId: string) {
+  const { data: probs, error: probsErr } = await supabaseAdmin
+    .from("run_problems")
+    .select("id")
+    .eq("run_id", runId);
+
+  if (probsErr) {
+    throw new Error(
+      `Failed to load run problems for mapping cleanup: ${probsErr.message}`,
+    );
+  }
+
+  const ids = (probs ?? []).map((p: { id: string }) => p.id).filter(Boolean);
+  if (ids.length === 0) return;
+
+  const { error: delErr } = await supabaseAdmin
+    .from("run_problem_entries")
+    .delete()
+    .in("problem_id", ids);
+
+  if (delErr) {
+    throw new Error(
+      `Failed to clear problem-entry mappings: ${delErr.message}`,
+    );
+  }
+}
+
 export async function processRun(runId: string) {
   // 1) Load the run
   const { data: run, error: runErr } = await supabaseAdmin
@@ -447,14 +478,13 @@ export async function processRun(runId: string) {
 
   // 3) If no entries, clear problems/features/deltas and exit
   if (feedback.length === 0) {
+    // ✅ Clear mappings first (needs existing run_problems ids)
+    await clearProblemEntryMappingsForRun(runId);
+
     await supabaseAdmin.from("run_problems").delete().eq("run_id", runId);
     await supabaseAdmin.from("run_features").delete().eq("run_id", runId);
     await supabaseAdmin.from("run_deltas").delete().eq("current_run_id", runId);
-    // ✅ Clear mappings too (avoid stale evidence)
-    await supabaseAdmin
-      .from("run_problem_entries")
-      .delete()
-      .eq("run_id", runId);
+
     return { created: 0, features: 0, deltas: false };
   }
 
@@ -504,7 +534,11 @@ export async function processRun(runId: string) {
     };
   });
 
-  // 7) Idempotent: clear existing problems for this run, then insert fresh
+  // 7) Idempotent: clear existing mappings + problems for this run, then insert fresh
+  // ✅ Clear mappings first (because mappings reference run_problems rows)
+  await clearProblemEntryMappingsForRun(runId);
+
+  // Then clear existing problems
   await supabaseAdmin.from("run_problems").delete().eq("run_id", runId);
 
   // Insert and RETURN inserted rows (we need their IDs)
@@ -523,10 +557,9 @@ export async function processRun(runId: string) {
 
   // ----------------------------------------------------
   // ✅ Persist feedback_entry → problem mapping
+  // NOTE: run_problem_entries has NO run_id column in your schema.
+  // It should store: problem_id (run_problems.id) + feedback_entry_id.
   // ----------------------------------------------------
-
-  // ✅ Clear previous mappings for THIS RUN (safe + complete)
-  await supabaseAdmin.from("run_problem_entries").delete().eq("run_id", runId);
 
   // Map title → problem_id (DB IDs)
   const titleToProblemId = new Map<string, string>();
@@ -534,9 +567,8 @@ export async function processRun(runId: string) {
     titleToProblemId.set(p.title, p.id);
   }
 
-  // Build mapping rows (include run_id)
+  // Build mapping rows (NO run_id)
   const mappingRows: Array<{
-    run_id: string;
     problem_id: string;
     feedback_entry_id: string;
   }> = [];
@@ -547,7 +579,6 @@ export async function processRun(runId: string) {
 
     for (const entryId of b.entryIds) {
       mappingRows.push({
-        run_id: runId,
         problem_id: problemId,
         feedback_entry_id: entryId,
       });
