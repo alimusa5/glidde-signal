@@ -20,23 +20,42 @@ function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null;
 }
 
+function formatUpgradePayload() {
+  return {
+    title: "Upgrade to Pro",
+    starterIncludes: [
+      "1 Active Project",
+      "Up to 3 Insight Runs per billing period",
+      "History of last 5 runs",
+    ],
+    proUnlocks: [
+      "Unlimited Projects",
+      "Unlimited Insight Runs",
+      "Full Run History",
+      "Priority Processing",
+    ],
+    cta: "Upgrade to Pro — $399/mo",
+  };
+}
+
 export async function POST(req: NextRequest) {
   try {
     const supabaseUrl = assertEnv("NEXT_PUBLIC_SUPABASE_URL");
     const serviceRoleKey = assertEnv("SUPABASE_SERVICE_ROLE_KEY");
-
     const supabaseAdmin = createClient(supabaseUrl, serviceRoleKey);
 
-    // Auth
+    // 0) Auth
     const token = getBearerToken(req);
-    if (!token)
+    if (!token) {
       return NextResponse.json(
         { error: "Missing bearer token" },
         { status: 401 },
       );
+    }
 
     const { data: userData, error: userErr } =
       await supabaseAdmin.auth.getUser(token);
+
     if (userErr || !userData?.user) {
       return NextResponse.json(
         { error: "Invalid user session" },
@@ -44,35 +63,39 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Body
+    const userId = userData.user.id;
+
+    // 1) Body
     const body: unknown = await req.json();
-    if (!isRecord(body))
+    if (!isRecord(body)) {
       return NextResponse.json({ error: "Invalid body" }, { status: 400 });
+    }
 
     const nameVal = body.name;
     const name = typeof nameVal === "string" ? nameVal.trim() : "";
 
-    if (!name)
+    if (!name) {
       return NextResponse.json(
         { error: "Project name is required" },
         { status: 400 },
       );
-    if (name.length > 80)
+    }
+
+    if (name.length > 80) {
       return NextResponse.json(
         { error: "Project name too long" },
         { status: 400 },
       );
+    }
 
-    const userId = userData.user.id;
-
-    // ✅ Billing gate: Starter = max 1 project
+    // 2) Subscription gate (Option A)
     const sub = await getActiveSubscriptionForUser(userId);
+    const allowedStatuses = new Set(["active", "trialing", "past_due"]);
 
-    // If no subscription, treat as Starter locked (or block completely)
-    // Here: we block project creation unless user has active subscription.
-    if (!sub || (sub.status !== "active" && sub.status !== "trialing")) {
+    if (!sub || !allowedStatuses.has(sub.status)) {
       return NextResponse.json(
         {
+          code: "NO_ACTIVE_SUBSCRIPTION",
           error:
             "No active subscription. Please subscribe to create a project.",
         },
@@ -80,27 +103,50 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    if (sub.plan === "starter") {
+    const isPro = sub.plan === "pro";
+    const plan = sub.plan;
+
+    // For Option A: subscription period reset
+    const periodStart = sub.current_period_start;
+    const periodEnd = sub.current_period_end;
+    const nextResetAt = sub.current_period_end;
+
+    // 3) Starter project cap
+    if (!isPro) {
       const { count, error: countErr } = await supabaseAdmin
         .from("projects")
         .select("id", { count: "exact", head: true })
         .eq("user_id", userId);
 
-      if (countErr)
+      if (countErr) {
         return NextResponse.json({ error: countErr.message }, { status: 500 });
+      }
 
-      if ((count ?? 0) >= 1) {
+      const activeProjects = count ?? 0;
+
+      if (activeProjects >= 1) {
         return NextResponse.json(
           {
+            code: "PROJECT_LIMIT_REACHED",
             error:
               "Starter plan allows only 1 active project. Upgrade to Pro for unlimited projects.",
+            entitlements: {
+              plan,
+              isPro,
+              activeProjects,
+              maxActiveProjects: 1,
+              nextResetAt: nextResetAt ?? null,
+              periodStart: periodStart ?? null,
+              periodEnd: periodEnd ?? null,
+            },
+            upgrade: formatUpgradePayload(),
           },
-          { status: 403 },
+          { status: 402 },
         );
       }
     }
 
-    // Create project
+    // 4) Create project
     const { data, error } = await supabaseAdmin
       .from("projects")
       .insert({ name, user_id: userId })

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { supabase } from "@/lib/supabase";
@@ -30,6 +30,105 @@ type RunMemoMeta = {
 
 type MemoMetaByRunId = Record<string, { created_at: string }>;
 
+type UpgradePayload = {
+  title: string;
+  starterIncludes: string[];
+  proUnlocks: string[];
+  cta: string;
+};
+
+type EntitlementsPayload = {
+  plan: "starter" | "pro";
+  isPro: boolean;
+  runsUsedThisPeriod?: number | null;
+  runsLimit?: number | null;
+  nextResetAt?: string | null;
+  periodStart?: string | null;
+  periodEnd?: string | null;
+};
+
+type RunCreateSuccess = { runId: string; entitlements?: EntitlementsPayload };
+
+type RunCreateError = {
+  code?: string;
+  error?: string;
+  entitlements?: EntitlementsPayload;
+  upgrade?: UpgradePayload;
+  waitSeconds?: number;
+};
+
+function formatDateShort(value?: string | null) {
+  if (!value) return null;
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return null;
+  return d.toLocaleDateString(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+  });
+}
+
+function formatDateTime(value: string) {
+  const d = new Date(value);
+  return Number.isNaN(d.getTime()) ? value : d.toLocaleString();
+}
+
+function titleCase(s: string) {
+  if (!s) return s;
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+function statusChipStyle(
+  status: RunHistoryItem["status"],
+): React.CSSProperties {
+  // No fancy colors; keep it simple and premium.
+  // We can still differentiate by background shade and border.
+  const base: React.CSSProperties = {
+    fontSize: 12,
+    padding: "4px 10px",
+    borderRadius: 999,
+    border: "1px solid #ddd",
+    background: "#fafafa",
+    color: "#111",
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 6,
+    whiteSpace: "nowrap",
+  };
+
+  if (status === "completed") return base;
+  if (status === "processing")
+    return { ...base, background: "#fff", border: "1px solid #ccc" };
+  if (status === "failed")
+    return { ...base, background: "#fff", border: "1px solid #bbb" };
+  // queued
+  return { ...base, background: "#f3f3f3" };
+}
+
+function statusLabel(status: RunHistoryItem["status"]) {
+  if (status === "completed") return "Completed";
+  if (status === "processing") return "Processing";
+  if (status === "failed") return "Failed";
+  return "Queued";
+}
+
+function statusDotStyle(status: RunHistoryItem["status"]): React.CSSProperties {
+  // Minimal dot; no strong color signaling
+  const base: React.CSSProperties = {
+    width: 7,
+    height: 7,
+    borderRadius: 999,
+    display: "inline-block",
+    background: "#111",
+    opacity: 0.25,
+  };
+
+  if (status === "completed") return { ...base, opacity: 0.45 };
+  if (status === "processing") return { ...base, opacity: 0.35 };
+  if (status === "failed") return { ...base, opacity: 0.55 };
+  return { ...base, opacity: 0.25 };
+}
+
 export default function ProjectPage() {
   const router = useRouter();
   const params = useParams<{ id: string }>();
@@ -49,17 +148,27 @@ export default function ProjectPage() {
   const [latest, setLatest] = useState<LatestUploadSummary | null>(null);
   const [loadingLatest, setLoadingLatest] = useState(false);
 
-  // Step 1 additions: Run entry point UI state
+  // Run entry point UI state
   const [isCreatingRun, setIsCreatingRun] = useState(false);
   const [runMsg, setRunMsg] = useState<string>("");
   const [runError, setRunError] = useState<string>("");
 
-  // Step 3 additions: Run History state
+  // Day 12: premium run upgrade state
+  const [runUpgrade, setRunUpgrade] = useState<UpgradePayload | null>(null);
+  const [runEntitlements, setRunEntitlements] =
+    useState<EntitlementsPayload | null>(null);
+
+  const runBlocked = useMemo(() => runUpgrade !== null, [runUpgrade]);
+
+  // Run History state
   const [runs, setRuns] = useState<RunHistoryItem[]>([]);
   const [loadingRuns, setLoadingRuns] = useState(false);
 
-  // ✅ Step 1 (Day 9): memo existence + memo timestamp map by run_id
+  // Memo existence + timestamp map by run_id
   const [memoMeta, setMemoMeta] = useState<MemoMetaByRunId>({});
+
+  // Day 12: Starter vs Pro run history cap
+  const [historyLimit, setHistoryLimit] = useState<number>(5);
 
   async function getAccessToken(): Promise<string> {
     const { data, error } = await supabase.auth.getSession();
@@ -102,8 +211,8 @@ export default function ProjectPage() {
     }
   }
 
-  // ✅ Step 1 (Day 9): Load run history list + memo metadata (fast, no joins)
-  async function loadRunHistory(projectId: string) {
+  // Load run history list + memo metadata with plan-based limit
+  async function loadRunHistory(projectId: string, limit: number) {
     setLoadingRuns(true);
     try {
       const { data: userData } = await supabase.auth.getUser();
@@ -115,12 +224,11 @@ export default function ProjectPage() {
         .eq("project_id", projectId)
         .eq("user_id", userData.user.id)
         .order("created_at", { ascending: false })
-        .limit(10);
+        .limit(limit);
 
       const runsList = (runRows ?? []) as RunHistoryItem[];
       setRuns(runsList);
 
-      // Fetch memo metadata for these runs (only run_id + created_at)
       const runIds = runsList.map((r) => r.id);
       if (runIds.length === 0) {
         setMemoMeta({});
@@ -181,8 +289,13 @@ export default function ProjectPage() {
     return data as UploadResult;
   }
 
-  // Step 1 addition: create Run API call
-  async function createRun(projectId: string) {
+  // Create run returning structured errors (no blind throw)
+  async function createRun(
+    projectId: string,
+  ): Promise<
+    | { ok: true; data: RunCreateSuccess }
+    | { ok: false; status: number; data: RunCreateError }
+  > {
     const token = await getAccessToken();
 
     const res = await fetch("/api/runs/create", {
@@ -193,15 +306,16 @@ export default function ProjectPage() {
       },
       body: JSON.stringify({
         projectId,
-        scope: "upload", // Day 4 default: latest upload snapshot
-        sourceFilter: "all", // Day 4 default
-        // uploadId intentionally omitted → API uses latest upload
+        scope: "upload",
+        sourceFilter: "all",
       }),
     });
 
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data?.error ?? "Unable to create a run.");
-    return data as { runId: string };
+    const data = (await res.json().catch(() => ({}))) as RunCreateSuccess &
+      RunCreateError;
+
+    if (!res.ok) return { ok: false, status: res.status, data };
+    return { ok: true, data: data as RunCreateSuccess };
   }
 
   useEffect(() => {
@@ -226,16 +340,28 @@ export default function ProjectPage() {
       setName(data.name);
       setLoading(false);
 
+      // Determine plan for history cap (starter=5, pro=50)
+      const { data: subRow } = await supabase
+        .from("subscriptions")
+        .select("plan,status,updated_at")
+        .eq("user_id", userData.user.id)
+        .in("status", ["active", "trialing", "past_due"])
+        .order("updated_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      const isPro = subRow?.plan === "pro";
+      const limit = isPro ? 50 : 5;
+      setHistoryLimit(limit);
+
       await loadLatestUploadSummary(id);
-      await loadRunHistory(id);
+      await loadRunHistory(id, limit);
     }
 
     load();
   }, [id, router]);
 
   if (loading) return <div style={{ padding: 32 }}>Loading project...</div>;
-
-  const formatTime = (iso: string) => new Date(iso).toLocaleString();
 
   return (
     <div style={{ padding: 40, maxWidth: 800, margin: "0 auto" }}>
@@ -257,12 +383,84 @@ export default function ProjectPage() {
           <div>Loading…</div>
         ) : latest ? (
           <>
-            <div>Source: {latest.source}</div>
+            <div>Source: {titleCase(latest.source)}</div>
             <div>Entries: {latest.count}</div>
-            <div>Uploaded: {formatTime(latest.createdAt)}</div>
+            <div>Uploaded: {formatDateTime(latest.createdAt)}</div>
             <div style={{ marginTop: 4 }}>Status: Ready to analyze</div>
 
-            {/* 👇 Step 1: View Feedback + Generate Insights (Run entry point) */}
+            {/* Plan/Usage header (only when we have entitlements) */}
+            {runEntitlements && (
+              <div
+                style={{
+                  marginTop: 12,
+                  padding: 12,
+                  border: "1px solid #e5e5e5",
+                  borderRadius: 12,
+                  background: "#fff",
+                }}
+              >
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 10,
+                    flexWrap: "wrap",
+                  }}
+                >
+                  <span
+                    style={{
+                      fontSize: 12,
+                      padding: "4px 10px",
+                      borderRadius: 999,
+                      border: "1px solid #ddd",
+                      background: "#fafafa",
+                    }}
+                  >
+                    Current Plan:{" "}
+                    <b style={{ textTransform: "capitalize" }}>
+                      {runEntitlements.plan}
+                    </b>
+                  </span>
+
+                  {typeof runEntitlements.runsUsedThisPeriod === "number" &&
+                    typeof runEntitlements.runsLimit === "number" && (
+                      <span style={{ fontSize: 13 }}>
+                        Runs Used: <b>{runEntitlements.runsUsedThisPeriod}</b> /{" "}
+                        {runEntitlements.runsLimit} this billing period
+                      </span>
+                    )}
+
+                  {runEntitlements.runsLimit === null && (
+                    <span style={{ fontSize: 13 }}>
+                      Runs: <b>Unlimited</b>
+                    </span>
+                  )}
+
+                  {runEntitlements.nextResetAt && (
+                    <span style={{ fontSize: 13 }}>
+                      Next Reset:{" "}
+                      <b>
+                        {formatDateShort(runEntitlements.nextResetAt) ??
+                          runEntitlements.nextResetAt}
+                      </b>
+                    </span>
+                  )}
+                </div>
+
+                {runEntitlements.periodStart && runEntitlements.periodEnd && (
+                  <div style={{ marginTop: 6, fontSize: 12, color: "#555" }}>
+                    Billing period:{" "}
+                    {formatDateShort(runEntitlements.periodStart) ??
+                      runEntitlements.periodStart}{" "}
+                    →{" "}
+                    {formatDateShort(runEntitlements.periodEnd) ??
+                      runEntitlements.periodEnd}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* View Feedback + Generate Insights */}
             <div
               style={{
                 marginTop: 16,
@@ -280,16 +478,18 @@ export default function ProjectPage() {
                   border: "1px solid #ccc",
                   textDecoration: "none",
                   fontSize: 14,
+                  background: "#fff",
                 }}
               >
                 View Feedback
               </Link>
 
               <button
-                disabled={isCreatingRun || !latest}
+                disabled={isCreatingRun || !latest || runBlocked}
                 onClick={async () => {
                   setRunMsg("");
                   setRunError("");
+                  setRunUpgrade(null);
 
                   if (!latest) {
                     setRunError(
@@ -301,16 +501,44 @@ export default function ProjectPage() {
                   setIsCreatingRun(true);
 
                   try {
-                    const { runId } = await createRun(id);
-                    // refresh history before leaving (useful when user comes back)
-                    await loadRunHistory(id);
+                    const result = await createRun(id);
+
+                    if (!result.ok) {
+                      if (result.status === 402 && result.data?.upgrade) {
+                        setRunUpgrade(result.data.upgrade ?? null);
+                        setRunEntitlements(result.data.entitlements ?? null);
+                        setRunError(result.data.error ?? "Upgrade required.");
+                        return;
+                      }
+
+                      if (
+                        result.status === 429 &&
+                        result.data?.code === "RATE_LIMITED"
+                      ) {
+                        const wait = result.data.waitSeconds
+                          ? ` (${result.data.waitSeconds}s)`
+                          : "";
+                        setRunError(
+                          (result.data.error ??
+                            "Please wait before trying again.") + wait,
+                        );
+                        return;
+                      }
+
+                      setRunError(
+                        result.data?.error ?? "Unable to create a run.",
+                      );
+                      return;
+                    }
+
+                    if (result.data.entitlements) {
+                      setRunEntitlements(result.data.entitlements);
+                    }
+
+                    const { runId } = result.data;
+
+                    await loadRunHistory(id, historyLimit);
                     router.push(`/project/${id}/runs/${runId}`);
-                  } catch (e: unknown) {
-                    setRunError(
-                      e instanceof Error
-                        ? e.message
-                        : "Unable to create a run.",
-                    );
                   } finally {
                     setIsCreatingRun(false);
                   }
@@ -319,16 +547,158 @@ export default function ProjectPage() {
                   padding: "8px 14px",
                   borderRadius: 8,
                   border: "1px solid #ccc",
-                  background: isCreatingRun || !latest ? "#f3f3f3" : "white",
+                  background:
+                    isCreatingRun || !latest || runBlocked ? "#f3f3f3" : "#fff",
                   fontSize: 14,
-                  cursor: isCreatingRun || !latest ? "not-allowed" : "pointer",
+                  cursor:
+                    isCreatingRun || !latest || runBlocked
+                      ? "not-allowed"
+                      : "pointer",
                 }}
               >
                 {isCreatingRun ? "Creating run..." : "Generate Insights"}
               </button>
             </div>
 
-            {runError && (
+            {/* Premium Upgrade Card for Run limit */}
+            {runUpgrade && (
+              <div
+                style={{
+                  marginTop: 14,
+                  padding: 16,
+                  border: "1px solid #e5e5e5",
+                  borderRadius: 14,
+                  background: "#fff",
+                }}
+              >
+                <div style={{ fontSize: 16, fontWeight: 700 }}>
+                  {runUpgrade.title}
+                </div>
+                <div style={{ marginTop: 6, color: "#444", fontSize: 13 }}>
+                  You’ve hit the Starter run limit for this billing period. Pro
+                  removes limits and supports continuous insight.
+                </div>
+
+                <div
+                  style={{
+                    marginTop: 12,
+                    display: "grid",
+                    gridTemplateColumns: "1fr 1fr",
+                    gap: 12,
+                  }}
+                >
+                  <div
+                    style={{
+                      padding: 12,
+                      borderRadius: 12,
+                      background: "#fafafa",
+                      border: "1px solid #eee",
+                    }}
+                  >
+                    <div
+                      style={{
+                        fontSize: 12,
+                        fontWeight: 700,
+                        marginBottom: 8,
+                      }}
+                    >
+                      Starter includes
+                    </div>
+                    <ul
+                      style={{
+                        margin: 0,
+                        paddingLeft: 18,
+                        fontSize: 13,
+                        color: "#333",
+                      }}
+                    >
+                      {runUpgrade.starterIncludes.map((x) => (
+                        <li key={x} style={{ marginBottom: 6 }}>
+                          {x}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+
+                  <div
+                    style={{
+                      padding: 12,
+                      borderRadius: 12,
+                      background: "#111",
+                      color: "#fff",
+                    }}
+                  >
+                    <div
+                      style={{
+                        fontSize: 12,
+                        fontWeight: 700,
+                        marginBottom: 8,
+                      }}
+                    >
+                      Pro unlocks
+                    </div>
+                    <ul
+                      style={{
+                        margin: 0,
+                        paddingLeft: 18,
+                        fontSize: 13,
+                        color: "#fff",
+                      }}
+                    >
+                      {runUpgrade.proUnlocks.map((x) => (
+                        <li key={x} style={{ marginBottom: 6 }}>
+                          {x}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                </div>
+
+                <div
+                  style={{
+                    marginTop: 12,
+                    display: "flex",
+                    gap: 10,
+                    alignItems: "center",
+                    flexWrap: "wrap",
+                  }}
+                >
+                  <button
+                    type="button"
+                    onClick={() => router.push("/billing")}
+                    style={{
+                      padding: "10px 14px",
+                      borderRadius: 10,
+                      border: "1px solid #111",
+                      background: "#111",
+                      color: "#fff",
+                      cursor: "pointer",
+                    }}
+                  >
+                    {runUpgrade.cta}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setRunUpgrade(null);
+                      setRunError("");
+                    }}
+                    style={{
+                      padding: "10px 14px",
+                      borderRadius: 10,
+                      border: "1px solid #ddd",
+                      background: "#fff",
+                      color: "#111",
+                      cursor: "pointer",
+                    }}
+                  >
+                    Not now
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {runError && !runUpgrade && (
               <div style={{ marginTop: 10, color: "crimson" }}>{runError}</div>
             )}
 
@@ -339,16 +709,32 @@ export default function ProjectPage() {
         )}
       </section>
 
-      {/* Run History */}
+      {/* Run History (Polished) */}
       <section
         style={{
           marginTop: 24,
           border: "1px solid #e5e5e5",
           borderRadius: 12,
           padding: 20,
+          background: "#fff",
         }}
       >
-        <div style={{ fontWeight: 600, marginBottom: 12 }}>Run History</div>
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            gap: 12,
+            flexWrap: "wrap",
+            alignItems: "baseline",
+            marginBottom: 12,
+          }}
+        >
+          <div style={{ fontWeight: 600 }}>Run History</div>
+          <div style={{ fontSize: 12, color: "#666" }}>
+            Showing last {runs.length} run{runs.length === 1 ? "" : "s"}
+            {historyLimit ? ` (cap: ${historyLimit})` : ""}
+          </div>
+        </div>
 
         {loadingRuns ? (
           <div>Loading…</div>
@@ -360,6 +746,13 @@ export default function ProjectPage() {
               const memoSavedAt = memoMeta[r.id]?.created_at;
               const hasMemo = !!memoSavedAt;
 
+              const scopeLabel =
+                r.scope === "project" ? "Project-wide" : "Latest upload";
+              const sourceLabel =
+                r.source_filter === "all"
+                  ? "All sources"
+                  : titleCase(r.source_filter);
+
               return (
                 <Link
                   key={r.id}
@@ -367,30 +760,69 @@ export default function ProjectPage() {
                   style={{
                     textDecoration: "none",
                     border: "1px solid #eee",
-                    borderRadius: 10,
-                    padding: 12,
+                    borderRadius: 12,
+                    padding: 14,
                     color: "#111",
+                    background: "#fff",
                   }}
                 >
-                  <div style={{ fontWeight: 600 }}>
-                    {new Date(r.created_at).toLocaleString()}
-                  </div>
+                  {/* Top row: date + status chip */}
+                  <div
+                    style={{
+                      display: "flex",
+                      justifyContent: "space-between",
+                      gap: 12,
+                      flexWrap: "wrap",
+                      alignItems: "center",
+                    }}
+                  >
+                    <div style={{ fontWeight: 650 }}>
+                      {formatDateTime(r.created_at)}
+                    </div>
 
-                  <div style={{ color: "#444", marginTop: 4, fontSize: 14 }}>
-                    Scope:{" "}
-                    {r.scope === "project" ? "Project-wide" : "Single upload"} •
-                    Source: {r.source_filter} • Entries: {r.entry_count} •
-                    Status: {r.status} •{" "}
-                    <span style={{ fontWeight: 600 }}>
-                      {hasMemo ? "✅ Memo" : "— No memo"}
+                    <span style={statusChipStyle(r.status)}>
+                      <span style={statusDotStyle(r.status)} />
+                      {statusLabel(r.status)}
                     </span>
                   </div>
 
-                  {hasMemo && (
-                    <div style={{ color: "#666", marginTop: 4, fontSize: 13 }}>
-                      Memo saved at: {new Date(memoSavedAt).toLocaleString()}
-                    </div>
-                  )}
+                  {/* Middle row: snapshot metadata */}
+                  <div
+                    style={{
+                      marginTop: 8,
+                      display: "flex",
+                      gap: 10,
+                      flexWrap: "wrap",
+                      fontSize: 13,
+                      color: "#444",
+                    }}
+                  >
+                    <span>
+                      Scope: <b>{scopeLabel}</b>
+                    </span>
+                    <span style={{ opacity: 0.5 }}>•</span>
+                    <span>
+                      Source: <b>{sourceLabel}</b>
+                    </span>
+                    <span style={{ opacity: 0.5 }}>•</span>
+                    <span>
+                      Entries: <b>{r.entry_count}</b>
+                    </span>
+                  </div>
+
+                  {/* Bottom row: memo indicator */}
+                  <div style={{ marginTop: 8, fontSize: 13, color: "#555" }}>
+                    <span style={{ fontWeight: 600 }}>
+                      {hasMemo
+                        ? "✅ Executive memo saved"
+                        : "— No executive memo"}
+                    </span>
+                    {hasMemo && (
+                      <span style={{ marginLeft: 8, color: "#777" }}>
+                        ({formatDateTime(memoSavedAt)})
+                      </span>
+                    )}
+                  </div>
                 </Link>
               );
             })}
@@ -405,6 +837,7 @@ export default function ProjectPage() {
           border: "1px solid #e5e5e5",
           borderRadius: 12,
           padding: 24,
+          background: "#fff",
         }}
       >
         <h2 style={{ fontSize: 20, marginBottom: 16 }}>
@@ -491,6 +924,7 @@ export default function ProjectPage() {
               padding: "8px 16px",
               borderRadius: 8,
               border: "1px solid #ccc",
+              background: "#fff",
             }}
           >
             {isUploading ? "Uploading..." : "Upload"}
