@@ -1,14 +1,38 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabase";
+import { useRouter } from "next/navigation";
+import Topbar from "@/components/app/Topbar";
 
 type Plan = "starter" | "pro";
 
 export default function BillingPage() {
+  const router = useRouter();
+
+  const [email, setEmail] = useState<string | null>(null);
+
   const [loadingPlan, setLoadingPlan] = useState<Plan | null>(null);
   const [openingPortal, setOpeningPortal] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const busy = useMemo(
+    () => openingPortal || loadingPlan !== null,
+    [openingPortal, loadingPlan],
+  );
+
+  // Ensure authenticated + get email for topbar
+  useEffect(() => {
+    async function init() {
+      const { data } = await supabase.auth.getUser();
+      if (!data.user) {
+        router.replace("/login");
+        return;
+      }
+      setEmail(data.user.email ?? null);
+    }
+    init();
+  }, [router]);
 
   async function startCheckout(plan: Plan) {
     setError(null);
@@ -30,7 +54,7 @@ export default function BillingPage() {
         body: JSON.stringify({ plan }),
       });
 
-      const json: unknown = await res.json();
+      const json: unknown = await res.json().catch(() => ({}));
 
       if (!res.ok) {
         const msg =
@@ -68,12 +92,10 @@ export default function BillingPage() {
 
       const res = await fetch("/api/billing/portal", {
         method: "GET",
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
+        headers: { Authorization: `Bearer ${token}` },
       });
 
-      const json: unknown = await res.json();
+      const json: unknown = await res.json().catch(() => ({}));
 
       if (!res.ok) {
         const msg =
@@ -99,113 +121,165 @@ export default function BillingPage() {
   }
 
   return (
-    <main style={{ maxWidth: 720, margin: "0 auto", padding: 24 }}>
-      <div
-        style={{
-          display: "flex",
-          alignItems: "flex-start",
-          justifyContent: "space-between",
-          gap: 12,
-        }}
-      >
-        <div>
-          <h1 style={{ fontSize: 28, fontWeight: 700, marginBottom: 8 }}>
-            Billing
-          </h1>
-          <p style={{ opacity: 0.8, marginBottom: 24 }}>
-            Choose a plan to activate subscriptions inside the product.
-          </p>
+    <div className="min-h-screen bg-background text-foreground">
+      <Topbar email={email} />
+
+      <div className="mx-auto max-w-6xl px-6 py-10">
+        {/* Header */}
+        <div className="mb-10 flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+          <div>
+            <h1 className="text-3xl font-semibold">Billing</h1>
+            <p className="mt-2 text-muted-foreground">
+              Choose a plan to activate subscriptions inside Glidde Signal.
+            </p>
+          </div>
+
+          <button
+            onClick={openCustomerPortal}
+            disabled={busy}
+            className="h-10 rounded-xl border border-border bg-card px-4 text-sm font-semibold transition hover:bg-muted disabled:opacity-50"
+          >
+            {openingPortal ? "Opening..." : "Manage Billing"}
+          </button>
         </div>
+
+        {error && (
+          <div className="mb-6 rounded-2xl border border-red-500/30 bg-red-500/10 p-4 text-sm text-red-400">
+            <span className="font-semibold">Error:</span> {error}
+          </div>
+        )}
+
+        {/* Plans */}
+        <div className="grid gap-6 md:grid-cols-2">
+          {/* Starter */}
+          <PlanCard
+            name="Starter"
+            price="$199"
+            cadence="/month"
+            subtitle="Best for early teams validating signal."
+            bullets={[
+              "1 active project",
+              "Up to 3 runs per month",
+              "Email support",
+            ]}
+            buttonLabel={
+              loadingPlan === "starter"
+                ? "Redirecting..."
+                : "Upgrade to Starter"
+            }
+            onClick={() => startCheckout("starter")}
+            disabled={busy}
+            variant="default"
+          />
+
+          {/* Pro */}
+          <PlanCard
+            name="Pro"
+            price="$399"
+            cadence="/month"
+            subtitle="Best for product teams shipping weekly."
+            bullets={[
+              "Unlimited projects",
+              "Unlimited runs",
+              "Priority support",
+            ]}
+            buttonLabel={
+              loadingPlan === "pro" ? "Redirecting..." : "Upgrade to Pro"
+            }
+            onClick={() => startCheckout("pro")}
+            disabled={busy}
+            variant="featured"
+          />
+        </div>
+
+        <div className="mt-10 text-sm text-muted-foreground">
+          Already subscribed? Use{" "}
+          <button
+            onClick={openCustomerPortal}
+            className="font-medium text-foreground underline underline-offset-4 hover:opacity-80"
+          >
+            Manage Billing
+          </button>{" "}
+          to update payment method, view invoices, or cancel.
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ================= PLAN CARD ================= */
+
+function PlanCard({
+  name,
+  price,
+  cadence,
+  subtitle,
+  bullets,
+  buttonLabel,
+  onClick,
+  disabled,
+  variant,
+}: {
+  name: string;
+  price: string;
+  cadence: string;
+  subtitle: string;
+  bullets: string[];
+  buttonLabel: string;
+  onClick: () => void;
+  disabled: boolean;
+  variant: "default" | "featured";
+}) {
+  const featured = variant === "featured";
+
+  return (
+    <section
+      className={`rounded-2xl border border-border bg-card p-6 ${
+        featured ? "relative overflow-hidden" : ""
+      }`}
+    >
+      {featured && (
+        <div className="absolute -right-24 -top-24 h-48 w-48 rounded-full bg-linear-to-r from-pink-500/20 to-fuchsia-500/20 blur-2xl" />
+      )}
+
+      <div className="relative">
+        <div className="flex items-center justify-between">
+          <h2 className="text-xl font-semibold">{name}</h2>
+          {featured && (
+            <span className="rounded-full bg-linear-to-r from-pink-500 to-fuchsia-500 px-3 py-1 text-xs font-semibold text-white">
+              Recommended
+            </span>
+          )}
+        </div>
+
+        <div className="mt-4 flex items-end gap-2">
+          <span className="text-4xl font-semibold">{price}</span>
+          <span className="pb-1 text-sm text-muted-foreground">{cadence}</span>
+        </div>
+
+        <p className="mt-3 text-sm text-muted-foreground">{subtitle}</p>
+
+        <ul className="mt-5 space-y-2 text-sm">
+          {bullets.map((b) => (
+            <li key={b} className="flex items-start gap-2">
+              <span className="mt-2 h-1.5 w-1.5 rounded-full bg-linear-to-r from-pink-500 to-fuchsia-500" />
+              <span>{b}</span>
+            </li>
+          ))}
+        </ul>
 
         <button
-          onClick={openCustomerPortal}
-          disabled={openingPortal || loadingPlan !== null}
-          style={{
-            height: 40,
-            padding: "0 14px",
-            borderRadius: 10,
-            border: "1px solid #111",
-            cursor: openingPortal || loadingPlan ? "not-allowed" : "pointer",
-            fontWeight: 600,
-            whiteSpace: "nowrap",
-          }}
+          onClick={onClick}
+          disabled={disabled}
+          className={`mt-6 w-full rounded-xl px-4 py-2 text-sm font-semibold transition disabled:opacity-50 ${
+            featured
+              ? "bg-linear-to-r from-pink-500 to-fuchsia-500 text-white hover:brightness-110"
+              : "border border-border bg-background hover:bg-muted"
+          }`}
         >
-          {openingPortal ? "Opening..." : "Manage Billing"}
+          {buttonLabel}
         </button>
       </div>
-
-      {error ? (
-        <div
-          style={{
-            border: "1px solid #ffb4b4",
-            padding: 12,
-            borderRadius: 8,
-            marginBottom: 16,
-          }}
-        >
-          <strong>Error:</strong> {error}
-        </div>
-      ) : null}
-
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns: "1fr",
-          gap: 16,
-        }}
-      >
-        <section
-          style={{ border: "1px solid #ddd", borderRadius: 12, padding: 16 }}
-        >
-          <h2 style={{ fontSize: 20, fontWeight: 700 }}>Starter</h2>
-          <p style={{ marginTop: 6, opacity: 0.8 }}>
-            $199/month • 1 project • up to 3 runs/month
-          </p>
-
-          <button
-            onClick={() => startCheckout("starter")}
-            disabled={loadingPlan !== null || openingPortal}
-            style={{
-              marginTop: 14,
-              padding: "10px 14px",
-              borderRadius: 10,
-              border: "1px solid #111",
-              cursor: loadingPlan || openingPortal ? "not-allowed" : "pointer",
-              width: "100%",
-              fontWeight: 600,
-            }}
-          >
-            {loadingPlan === "starter"
-              ? "Redirecting..."
-              : "Upgrade to Starter"}
-          </button>
-        </section>
-
-        <section
-          style={{ border: "1px solid #ddd", borderRadius: 12, padding: 16 }}
-        >
-          <h2 style={{ fontSize: 20, fontWeight: 700 }}>Pro</h2>
-          <p style={{ marginTop: 6, opacity: 0.8 }}>
-            $399/month • unlimited projects • unlimited runs
-          </p>
-
-          <button
-            onClick={() => startCheckout("pro")}
-            disabled={loadingPlan !== null || openingPortal}
-            style={{
-              marginTop: 14,
-              padding: "10px 14px",
-              borderRadius: 10,
-              border: "1px solid #111",
-              cursor: loadingPlan || openingPortal ? "not-allowed" : "pointer",
-              width: "100%",
-              fontWeight: 600,
-            }}
-          >
-            {loadingPlan === "pro" ? "Redirecting..." : "Upgrade to Pro"}
-          </button>
-        </section>
-      </div>
-    </main>
+    </section>
   );
 }
