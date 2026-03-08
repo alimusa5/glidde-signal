@@ -9,14 +9,13 @@ export default function Topbar({ email }: { email: string | null }) {
   const router = useRouter();
   const [open, setOpen] = useState(false);
 
-  // Theme handling (fix: initialize from localStorage, no setState in mount effect)
+  // Theme handling (safe lazy initializer)
   const [dark, setDark] = useState<boolean>(() => {
-    if (typeof window === "undefined") return true;
-    const saved = localStorage.getItem("theme");
-    return saved !== "light";
+    if (typeof window === "undefined") return false;
+    return localStorage.getItem("theme") !== "light";
   });
 
-  // Keep DOM in sync with React state (external system sync)
+  // Sync React state → DOM
   useEffect(() => {
     if (dark) {
       document.documentElement.classList.add("dark");
@@ -26,14 +25,15 @@ export default function Topbar({ email }: { email: string | null }) {
   }, [dark]);
 
   function toggleTheme() {
-    if (dark) {
-      document.documentElement.classList.remove("dark");
-      localStorage.setItem("theme", "light");
-      setDark(false);
-    } else {
+    const next = !dark;
+
+    setDark(next);
+    localStorage.setItem("theme", next ? "dark" : "light");
+
+    if (next) {
       document.documentElement.classList.add("dark");
-      localStorage.setItem("theme", "dark");
-      setDark(true);
+    } else {
+      document.documentElement.classList.remove("dark");
     }
   }
 
@@ -73,12 +73,14 @@ export default function Topbar({ email }: { email: string | null }) {
             >
               Dashboard
             </button>
+
             <button
               onClick={() => router.push("/billing")}
               className="text-muted-foreground hover:text-foreground"
             >
               Billing
             </button>
+
             <button className="text-muted-foreground hover:text-foreground">
               Settings
             </button>
@@ -104,6 +106,7 @@ export default function Topbar({ email }: { email: string | null }) {
               <div className="flex h-9 w-9 items-center justify-center rounded-full bg-linear-to-r from-pink-500 to-fuchsia-500 text-sm font-semibold text-white">
                 {initials}
               </div>
+
               <span className="hidden text-sm text-muted-foreground md:block">
                 {email}
               </span>

@@ -124,3 +124,43 @@
     @apply bg-background text-foreground;
   }
 }
+
+/* ================= BUTTON MICRO ANIMATIONS ================= */
+
+@keyframes pinkPulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(236, 72, 153, 0.6);
+  }
+  70% {
+    box-shadow: 0 0 0 8px rgba(236, 72, 153, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(236, 72, 153, 0);
+  }
+}
+
+.animate-pink-pulse {
+  animation: pinkPulse 0.6s ease-out;
+}
+
+/* shimmer loading animation */
+
+@keyframes shimmer {
+  0% {
+    background-position: -300px 0;
+  }
+  100% {
+    background-position: 300px 0;
+  }
+}
+
+.animate-shimmer {
+  background: linear-gradient(
+    90deg,
+    rgba(236, 72, 153, 0.15) 0%,
+    rgba(236, 72, 153, 0.35) 50%,
+    rgba(236, 72, 153, 0.15) 100%
+  );
+  background-size: 600px 100%;
+  animation: shimmer 1.2s infinite linear;
+}

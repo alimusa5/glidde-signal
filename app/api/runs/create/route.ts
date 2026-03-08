@@ -95,39 +95,31 @@ export async function POST(req: Request) {
   const periodEnd = sub.current_period_end ?? startOfNextMonthISO();
   const nextResetAt = periodEnd;
 
-  // 3) Soft rate limit: 1 run per 10 seconds
-  const { data: lastRun, error: lastRunErr } = await supabaseAdmin
-    .from("runs")
-    .select("created_at")
-    .eq("user_id", userId)
-    .order("created_at", { ascending: false })
-    .limit(1)
-    .maybeSingle();
+  // 3) Soft rate limit: prevent runs within last 10 seconds
+  const tenSecondsAgo = new Date(Date.now() - 10_000).toISOString();
 
-  if (lastRunErr) {
+  const { count: recentRuns, error: rateErr } = await supabaseAdmin
+    .from("runs")
+    .select("id", { count: "exact", head: true })
+    .eq("user_id", userId)
+    .gte("created_at", tenSecondsAgo);
+
+  if (rateErr) {
     return NextResponse.json(
       { error: "Failed to validate rate limit." },
       { status: 500 },
     );
   }
 
-  if (lastRun?.created_at) {
-    const last = new Date(lastRun.created_at).getTime();
-    const now = Date.now();
-    const diffMs = now - last;
-    const minGapMs = 10_000;
-
-    if (diffMs < minGapMs) {
-      const waitSeconds = Math.ceil((minGapMs - diffMs) / 1000);
-      return NextResponse.json(
-        {
-          code: "RATE_LIMITED",
-          error: `Please wait ${waitSeconds}s before creating another run.`,
-          waitSeconds,
-        },
-        { status: 429 },
-      );
-    }
+  if ((recentRuns ?? 0) > 0) {
+    return NextResponse.json(
+      {
+        code: "RATE_LIMITED",
+        error: "Please wait 10 seconds before creating another run.",
+        waitSeconds: 10,
+      },
+      { status: 429 },
+    );
   }
 
   // 4) Starter run-limit gate (3 per billing period; exclude failed runs)
@@ -225,7 +217,9 @@ export async function POST(req: Request) {
   if (scope === "upload") {
     if (uploadId) {
       resolvedUploadId = uploadId;
-    } else {
+    }
+
+    if (!resolvedUploadId) {
       const { data: latestUpload } = await supabaseAdmin
         .from("uploads")
         .select("id")
@@ -240,7 +234,16 @@ export async function POST(req: Request) {
           { status: 400 },
         );
       }
+
       resolvedUploadId = latestUpload.id;
+    }
+
+    // EXTRA SAFETY
+    if (!resolvedUploadId) {
+      return NextResponse.json(
+        { error: "Upload resolution failed." },
+        { status: 500 },
+      );
     }
   }
 
